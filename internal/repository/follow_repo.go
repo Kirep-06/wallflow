@@ -92,9 +92,13 @@ func (r *FollowRepo) Follow(ctx context.Context, followerID, followeeID uint64, 
 			return fmt.Errorf("increment following_count for %d: %w", followerID, err)
 		}
 
+		nowBigV := wasBigV || (bigVThreshold > 0 && uint64(followeeStats.FollowerCount)+1 >= uint64(bigVThreshold))
 		if bigVThreshold > 0 {
+			// MySQL 单表 UPDATE 的 SET 子句严格按从左到右求值并立即写回当前行：
+			// 先基于递增前的 follower_count 计算 is_bigv，再递增 follower_count，
+			// 避免重复加一提前一名粉丝晋升，并确保数据库更新与返回值语义完全一致。
 			if err := tx.Exec(
-				"UPDATE user_follow_stats SET follower_count = follower_count + 1, is_bigv = IF(follower_count + 1 >= ?, 1, is_bigv), updated_at = ? WHERE user_id = ?",
+				"UPDATE user_follow_stats SET is_bigv = CASE WHEN follower_count + 1 >= ? THEN 1 ELSE is_bigv END, follower_count = follower_count + 1, updated_at = ? WHERE user_id = ?",
 				bigVThreshold, now, followeeID,
 			).Error; err != nil {
 				return fmt.Errorf("increment follower_count for %d: %w", followeeID, err)
@@ -108,7 +112,6 @@ func (r *FollowRepo) Follow(ctx context.Context, followerID, followeeID uint64, 
 			}
 		}
 
-		nowBigV := wasBigV || (bigVThreshold > 0 && uint64(followeeStats.FollowerCount)+1 >= uint64(bigVThreshold))
 		result = model.FollowMutationResult{
 			Changed:        true,
 			FolloweeIsBigV: nowBigV,
