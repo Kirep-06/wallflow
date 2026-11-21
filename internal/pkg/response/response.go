@@ -21,6 +21,10 @@ func OK(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, Body{Code: 0, Msg: "ok", Data: data})
 }
 
+func Created(c *gin.Context, data any) {
+	c.JSON(http.StatusCreated, Body{Code: 0, Msg: "ok", Data: data})
+}
+
 // Error 把任意错误映射为业务错误码；非 errno.Error 一律视为内部错误并记录日志，不向外暴露细节。
 func Error(c *gin.Context, err error) {
 	var e *errno.Error

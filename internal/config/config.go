@@ -3,9 +3,11 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/viper"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Config struct {
@@ -15,6 +17,8 @@ type Config struct {
 	Redis   RedisConfig   `mapstructure:"redis"`
 	Cache   CacheConfig   `mapstructure:"cache"`
 	Feed    FeedConfig    `mapstructure:"feed"`
+	Auth    AuthConfig    `mapstructure:"auth"`
+	User    UserConfig    `mapstructure:"user"`
 	Storage StorageConfig `mapstructure:"storage"`
 	Worker  WorkerConfig  `mapstructure:"worker"`
 }
@@ -57,6 +61,40 @@ type FeedConfig struct {
 	PageMax       int `mapstructure:"page_max"`
 }
 
+type AuthConfig struct {
+	JWTSecret       string `mapstructure:"jwt_secret"`
+	Issuer          string `mapstructure:"issuer"`
+	AccessTokenTTL  int    `mapstructure:"access_token_ttl"`
+	RefreshTokenTTL int    `mapstructure:"refresh_token_ttl"`
+	BcryptCost      int    `mapstructure:"bcrypt_cost"`
+}
+
+// Validate 校验 API 鉴权配置；Worker 进程无需调用。
+func (a AuthConfig) Validate() error {
+	if len(a.JWTSecret) < 32 {
+		return fmt.Errorf("auth.jwt_secret must be at least 32 bytes (set via WF_AUTH_JWT_SECRET)")
+	}
+	if strings.TrimSpace(a.Issuer) == "" {
+		return fmt.Errorf("auth.issuer must not be empty")
+	}
+	if a.AccessTokenTTL <= 0 || a.RefreshTokenTTL <= 0 {
+		return fmt.Errorf("auth token TTLs must be positive")
+	}
+	if a.AccessTokenTTL >= a.RefreshTokenTTL {
+		return fmt.Errorf("auth.access_token_ttl (%d) must be less than auth.refresh_token_ttl (%d)", a.AccessTokenTTL, a.RefreshTokenTTL)
+	}
+	if a.BcryptCost < bcrypt.MinCost || a.BcryptCost > bcrypt.MaxCost {
+		return fmt.Errorf("auth.bcrypt_cost (%d) out of range [%d, %d]", a.BcryptCost, bcrypt.MinCost, bcrypt.MaxCost)
+	}
+	return nil
+}
+
+type UserConfig struct {
+	DefaultAvatarKey string `mapstructure:"default_avatar_key"`
+	ProfileLocalTTL  int    `mapstructure:"profile_local_ttl"`
+	ProfileRedisTTL  int    `mapstructure:"profile_redis_ttl"`
+}
+
 type StorageConfig struct {
 	Provider           string `mapstructure:"provider"`
 	Bucket             string `mapstructure:"bucket"`
@@ -80,6 +118,7 @@ func Load(path string) (*Config, error) {
 	v.SetEnvPrefix("WF")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	_ = v.BindEnv("auth.jwt_secret", "WF_AUTH_JWT_SECRET")
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
@@ -87,6 +126,8 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	// JWT 密钥仅允许通过 WF_AUTH_JWT_SECRET 环境变量注入，忽略配置文件中的静态值。
+	cfg.Auth.JWTSecret = os.Getenv("WF_AUTH_JWT_SECRET")
 	return &cfg, nil
 }
 
@@ -106,6 +147,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("feed.latest_hot_size", 1000)
 	v.SetDefault("feed.page_default", 20)
 	v.SetDefault("feed.page_max", 50)
+	v.SetDefault("auth.issuer", "wallpaper-feed")
+	v.SetDefault("auth.access_token_ttl", 900)
+	v.SetDefault("auth.refresh_token_ttl", 604800)
+	v.SetDefault("auth.bcrypt_cost", 10)
+	v.SetDefault("user.default_avatar_key", "avatars/default.png")
+	v.SetDefault("user.profile_local_ttl", 30)
+	v.SetDefault("user.profile_redis_ttl", 1800)
 	v.SetDefault("storage.provider", "qiniu")
 	v.SetDefault("storage.token_expire_seconds", 3600)
 	v.SetDefault("storage.max_file_size_mb", 20)

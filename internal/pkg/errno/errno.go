@@ -23,6 +23,12 @@ var (
 	ErrUnauth    = &Error{Code: 10003, Message: "未登录", HTTP: 401}
 	ErrNotFound  = &Error{Code: 10004, Message: "资源不存在", HTTP: 404}
 	ErrBadCursor = &Error{Code: 10005, Message: "游标无效", HTTP: 400}
+	ErrForbidden = &Error{Code: 10006, Message: "无权操作", HTTP: 403}
+
+	ErrUsernameTaken      = &Error{Code: 20001, Message: "用户名已存在", HTTP: 400}
+	ErrInvalidCredentials = &Error{Code: 20002, Message: "用户名或密码错误", HTTP: 400}
+	ErrUserNotFound       = &Error{Code: 20003, Message: "用户不存在", HTTP: 404}
+	ErrSessionExpired     = &Error{Code: 20004, Message: "登录已过期，请重新登录", HTTP: 401}
 
 	ErrPostNotFound     = &Error{Code: 30001, Message: "帖子不存在", HTTP: 404}
 	ErrPostContentLong  = &Error{Code: 30002, Message: "文案过长", HTTP: 400}

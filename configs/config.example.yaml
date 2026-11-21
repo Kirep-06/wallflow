@@ -1,6 +1,6 @@
 # 复制为 configs/config.local.yaml 后修改；敏感项用环境变量注入（WF_ 前缀，例如 WF_STORAGE_SECRET_KEY）
 app:
-  env: dev # dev 时启用 X-User-ID 临时鉴权
+  env: dev # dev | prod
 
 http:
   addr: ":8080"
@@ -28,6 +28,18 @@ feed:
   latest_hot_size: 1000
   page_default: 20
   page_max: 50
+
+auth:
+  # jwt_secret 仅通过环境变量 WF_AUTH_JWT_SECRET 注入（至少 32 字节），Worker 进程无需配置
+  issuer: "wallpaper-feed"
+  access_token_ttl: 900       # 秒（15 分钟）
+  refresh_token_ttl: 604800   # 秒（7 天固定会话）
+  bcrypt_cost: 10
+
+user:
+  default_avatar_key: "avatars/default.png"
+  profile_local_ttl: 30       # 秒
+  profile_redis_ttl: 1800     # 秒（±10% 抖动）
 
 storage:
   provider: qiniu

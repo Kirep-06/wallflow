@@ -39,6 +39,20 @@ func (r *PostRepo) ListIDsBefore(ctx context.Context, beforeID uint64, limit int
 	return ids, nil
 }
 
+// ListUserIDsBefore 按 ID 倒序返回指定用户的正常帖子 ID（命中 idx_user_id）；beforeID 为 0 表示首页。
+func (r *PostRepo) ListUserIDsBefore(ctx context.Context, userID, beforeID uint64, limit int) ([]uint64, error) {
+	q := r.db.WithContext(ctx).Model(&model.Post{}).
+		Where("user_id = ? AND status = ?", userID, model.PostStatusNormal)
+	if beforeID > 0 {
+		q = q.Where("id < ?", beforeID)
+	}
+	var ids []uint64
+	if err := q.Order("id DESC").Limit(limit).Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("list user %d post ids before %d: %w", userID, beforeID, err)
+	}
+	return ids, nil
+}
+
 // ListNewerIDs 按 ID 倒序返回 id > afterID 的最新正常帖子，最多 limit 条。
 func (r *PostRepo) ListNewerIDs(ctx context.Context, afterID uint64, limit int) ([]uint64, error) {
 	var ids []uint64
