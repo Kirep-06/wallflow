@@ -78,6 +78,25 @@ func (s *UserService) userLock(userID uint64) *sync.Mutex {
 	return &s.locks[userID%userLockStripes]
 }
 
+// lockUserStripes 将一批用户 ID 映射到条纹锁槽，去重并按槽号升序加锁，返回逆序解锁函数。
+// 与单用户读取/失效共享同一把锁与全序加锁顺序，既避免同槽重复加锁自锁，也避免跨协程死锁。
+func (s *UserService) lockUserStripes(ids []uint64) func() {
+	slots := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		slots = append(slots, id%userLockStripes)
+	}
+	slices.Sort(slots)
+	slots = slices.Compact(slots)
+	for _, slot := range slots {
+		s.locks[slot].Lock()
+	}
+	return func() {
+		for i := len(slots) - 1; i >= 0; i-- {
+			s.locks[slots[i]].Unlock()
+		}
+	}
+}
+
 // SetFollowReader 注入关注计数与状态读取器（由装配层在构造 FollowService 后调用）。
 func (s *UserService) SetFollowReader(r FollowStatsReader) {
 	s.followReader = r
@@ -151,12 +170,17 @@ func (s *UserService) Exists(ctx context.Context, userID uint64) (bool, error) {
 }
 
 // GetPublicProfiles 批量通过三级缓存读取用户公开资料（不含关注计数），供关注/粉丝列表组装。
+// 与单用户读取和写后失效共享条纹锁（去重升序加锁），防止批量回源在资料更新失效后将旧值写回缓存。
 func (s *UserService) GetPublicProfiles(ctx context.Context, ids []uint64) (map[uint64]*model.UserProfileDTO, error) {
 	out := make(map[uint64]*model.UserProfileDTO, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	vals, err := s.profileCache.GetMany(ctx, ids, s.loadProfileCache, s.profileRedisTTL)
+	vals, err := func() (map[uint64][]byte, error) {
+		unlock := s.lockUserStripes(ids)
+		defer unlock()
+		return s.profileCache.GetMany(ctx, ids, s.loadProfileCache, s.profileRedisTTL)
+	}()
 	if err != nil {
 		return nil, err
 	}
