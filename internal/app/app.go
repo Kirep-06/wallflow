@@ -4,6 +4,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
+	"os"
 	"time"
 
 	"github.com/Kirep-06/gocache"
@@ -11,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"wallpaper-feed/internal/cache"
 	"wallpaper-feed/internal/config"
@@ -143,8 +147,30 @@ func (a *App) Close() error {
 	return firstErr
 }
 
+// NewGormConfig 构造启用参数化 SQL 日志的 GORM 配置，保留错误、耗时和 SQL 模板，避免在日志中泄露密码哈希等敏感实参。
+func NewGormConfig(w io.Writer, slowThreshold time.Duration) *gorm.Config {
+	if w == nil {
+		w = os.Stderr
+	}
+	if slowThreshold <= 0 {
+		slowThreshold = 200 * time.Millisecond
+	}
+	return &gorm.Config{
+		Logger: logger.New(
+			log.New(w, "", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             slowThreshold,
+				LogLevel:                  logger.Warn,
+				IgnoreRecordNotFoundError: true,
+				ParameterizedQueries:      true,
+				Colorful:                  false,
+			},
+		),
+	}
+}
+
 func openMySQL(ctx context.Context, cfg config.MySQLConfig) (*gorm.DB, error) {
-	db, err := gorm.Open(mysql.Open(cfg.DSN), &gorm.Config{})
+	db, err := gorm.Open(mysql.Open(cfg.DSN), NewGormConfig(os.Stderr, 200*time.Millisecond))
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
