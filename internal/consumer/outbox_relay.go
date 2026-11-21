@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -13,9 +14,10 @@ import (
 )
 
 const (
-	outboxDBOpTimeout    = 5 * time.Second
-	outboxConnRetryDelay = 2 * time.Second
-	maxOutboxBackoffSec  = 60
+	outboxDBOpTimeout     = 5 * time.Second
+	outboxConnBackoffBase = 2 * time.Second
+	outboxConnBackoffMax  = 30 * time.Second
+	maxOutboxBackoffSec   = 60
 )
 
 // OutboxStore 抽象 Outbox 仓储能力，便于单测替换。
@@ -28,19 +30,34 @@ type OutboxStore interface {
 
 // OutboxRelay 运行在 API 进程内，通过事件唤醒 + 定时轮询将 outbox_events 可靠投递至 RabbitMQ。
 // 严格遵循三阶段租约模式：事务内只做 Claim 续租，事务外执行 Publisher Confirms 投递，最后回写状态。
+//
+// 故障分级策略：
+//   - 基础设施连接/传输故障（mq.IsConnectionError）：不递增 retry_count、绝不将正常事件置为死信 status=2，
+//     保持 status=0 并按有界指数退避（默认 2s -> 30s）延后重试，MQ 恢复后自动补发；
+//   - 事件自身或非连接级错误（字段非法、404/403/406 拓扑权限错误、Broker Nack 等）：消耗单事件重试预算，
+//     按 min(2^retry_count, 60)s 退避，达到 MaxRetries 后置为 status=2（死信）并输出 Error 告警。
 type OutboxRelay struct {
-	store    OutboxStore
-	pub      mq.Publisher
-	cfg      config.OutboxConfig
-	notifyCh chan struct{}
+	store           OutboxStore
+	pub             mq.Publisher
+	cfg             config.OutboxConfig
+	notifyCh        chan struct{}
+	now             func() time.Time
+	connBackoffBase time.Duration
+	connBackoffMax  time.Duration
+
+	connFailures     int
+	connBackoffUntil time.Time
 }
 
 func NewOutboxRelay(store OutboxStore, pub mq.Publisher, cfg config.OutboxConfig) *OutboxRelay {
 	return &OutboxRelay{
-		store:    store,
-		pub:      pub,
-		cfg:      cfg,
-		notifyCh: make(chan struct{}, 1),
+		store:           store,
+		pub:             pub,
+		cfg:             cfg,
+		notifyCh:        make(chan struct{}, 1),
+		now:             time.Now,
+		connBackoffBase: outboxConnBackoffBase,
+		connBackoffMax:  outboxConnBackoffMax,
 	}
 }
 
@@ -82,6 +99,9 @@ func (r *OutboxRelay) drain(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if !r.connBackoffUntil.IsZero() && r.now().Before(r.connBackoffUntil) {
+			return
+		}
 		claimed, connErr := r.processBatch(ctx)
 		if connErr || claimed < r.cfg.BatchSize {
 			return
@@ -90,8 +110,9 @@ func (r *OutboxRelay) drain(ctx context.Context) {
 }
 
 func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
+	claimNow := r.now()
 	claimCtx, cancel := context.WithTimeout(ctx, outboxDBOpTimeout)
-	events, err := r.store.ClaimBatch(claimCtx, r.cfg.BatchSize, time.Duration(r.cfg.LeaseSeconds)*time.Second, time.Now())
+	events, err := r.store.ClaimBatch(claimCtx, r.cfg.BatchSize, time.Duration(r.cfg.LeaseSeconds)*time.Second, claimNow)
 	cancel()
 	if err != nil {
 		if ctx.Err() == nil {
@@ -108,6 +129,7 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
 	sentIDs := make([]uint64, 0, len(events))
 	var skippedIDs []uint64
 	connBroken := false
+	var connDeferUntil time.Time
 
 	for i, ev := range events {
 		if ctx.Err() != nil {
@@ -116,6 +138,11 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
 				skippedIDs = append(skippedIDs, rem.ID)
 			}
 			break
+		}
+
+		if ev.EventID == "" || ev.ExchangeName == "" || ev.RoutingKey == "" {
+			r.recordPermanentEventFailure(baseCtx, ev, errors.New("invalid outbox event metadata"), r.now())
+			continue
 		}
 
 		pubCtx, pubCancel := context.WithTimeout(baseCtx, pubTimeout)
@@ -135,22 +162,53 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
 			continue
 		}
 
-		now := time.Now()
-		r.recordPublishFailure(baseCtx, ev, pubErr, now)
+		now := r.now()
+		if ctx.Err() != nil && errors.Is(pubErr, context.Canceled) {
+			// 进程优雅退出打断发布：释放当前及剩余事件租约，不计失败。
+			for _, rem := range events[i:] {
+				skippedIDs = append(skippedIDs, rem.ID)
+			}
+			break
+		}
 
 		if mq.IsConnectionError(pubErr) {
-			// AMQP 连接级断开：立刻中止本批剩余事件并释放其租约，避免逐条等超时拖穿租约。
-			slog.Warn("outbox relay aborted batch on amqp connection error",
-				"event_id", ev.EventID, "remaining", len(events)-i-1, "err", pubErr)
+			// 基础设施连接故障：绝不消耗单事件重试预算，不标死信；
+			// 记录本次连接异常信息并按有界指数退避延后整批未发事件，等待 MQ 恢复自动补发。
+			if len(sentIDs) > 0 {
+				r.connFailures = 1
+			} else {
+				r.connFailures++
+			}
+			backoff := r.connectionBackoff(r.connFailures)
+			connDeferUntil = now.Add(backoff)
+			r.connBackoffUntil = connDeferUntil
+
+			slog.Warn("outbox relay deferred batch on amqp connection error",
+				"id", ev.ID,
+				"event_id", ev.EventID,
+				"remaining", len(events)-i-1,
+				"conn_failures", r.connFailures,
+				"backoff", backoff,
+				"err", pubErr,
+			)
+			r.deferEventOnConnectionError(baseCtx, ev, pubErr, connDeferUntil, now)
 			for _, rem := range events[i+1:] {
 				skippedIDs = append(skippedIDs, rem.ID)
 			}
 			connBroken = true
 			break
 		}
+
+		// 非连接级错误（拓扑/权限/Broker Nack/单事件异常）：消耗该事件重试预算。
+		r.recordPublishFailure(baseCtx, ev, pubErr, now)
 	}
 
-	now := time.Now()
+	if !connBroken && len(sentIDs) > 0 {
+		r.connFailures = 0
+		r.connBackoffUntil = time.Time{}
+	}
+
+	now := r.now()
 	if len(sentIDs) > 0 {
 		markCtx, markCancel := context.WithTimeout(baseCtx, outboxDBOpTimeout)
 		if err := r.store.MarkSent(markCtx, sentIDs, now); err != nil {
@@ -161,8 +219,8 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
 	if len(skippedIDs) > 0 {
 		relCtx, relCancel := context.WithTimeout(baseCtx, outboxDBOpTimeout)
 		releaseAt := now
-		if connBroken {
-			releaseAt = now.Add(outboxConnRetryDelay)
+		if connBroken && !connDeferUntil.IsZero() {
+			releaseAt = connDeferUntil
 		}
 		if err := r.store.ReleaseLease(relCtx, skippedIDs, releaseAt, now); err != nil {
 			slog.Warn("release outbox lease failed", "count", len(skippedIDs), "err", err)
@@ -171,6 +229,25 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, bool) {
 	}
 
 	return len(events), connBroken
+}
+
+// deferEventOnConnectionError 在基础设施连接故障时保留 status=0 与原有 retry_count，仅延后重试时间并记录 last_error。
+func (r *OutboxRelay) deferEventOnConnectionError(baseCtx context.Context, ev *model.OutboxEvent, pubErr error, deferUntil, now time.Time) {
+	failCtx, cancel := context.WithTimeout(baseCtx, outboxDBOpTimeout)
+	defer cancel()
+	if err := r.store.MarkFailed(failCtx, ev.ID, ev.RetryCount, deferUntil, false, pubErr.Error(), now); err != nil {
+		slog.Warn("defer outbox event on connection error failed", "id", ev.ID, "event_id", ev.EventID, "err", err)
+	}
+}
+
+func (r *OutboxRelay) recordPermanentEventFailure(baseCtx context.Context, ev *model.OutboxEvent, reason error, now time.Time) {
+	slog.Error("outbox event has unrecoverable metadata and moved to dead status",
+		"id", ev.ID, "event_id", ev.EventID, "err", reason)
+	failCtx, cancel := context.WithTimeout(baseCtx, outboxDBOpTimeout)
+	defer cancel()
+	if err := r.store.MarkFailed(failCtx, ev.ID, ev.RetryCount+1, now, true, reason.Error(), now); err != nil {
+		slog.Error("mark permanent outbox event failed error", "id", ev.ID, "event_id", ev.EventID, "err", err)
+	}
 }
 
 func (r *OutboxRelay) recordPublishFailure(baseCtx context.Context, ev *model.OutboxEvent, pubErr error, now time.Time) {
@@ -192,6 +269,29 @@ func (r *OutboxRelay) recordPublishFailure(baseCtx context.Context, ev *model.Ou
 	if err := r.store.MarkFailed(failCtx, ev.ID, nextRetryCount, nextRetryAt, dead, pubErr.Error(), now); err != nil {
 		slog.Error("mark outbox event failed error", "id", ev.ID, "event_id", ev.EventID, "err", err)
 	}
+}
+
+func (r *OutboxRelay) connectionBackoff(failures int) time.Duration {
+	base := r.connBackoffBase
+	if base <= 0 {
+		base = outboxConnBackoffBase
+	}
+	maxD := r.connBackoffMax
+	if maxD <= 0 {
+		maxD = outboxConnBackoffMax
+	}
+	if maxD < base {
+		maxD = base
+	}
+	if failures <= 1 {
+		return base
+	}
+	shift := min(failures-1, 6)
+	d := base << shift
+	if d > maxD || d <= 0 {
+		return maxD
+	}
+	return d
 }
 
 // outboxBackoffSeconds 计算单条事件指数退避秒数：min(2^retry_count, 60)。

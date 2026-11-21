@@ -88,7 +88,8 @@ func (r *OutboxRepo) MarkSent(ctx context.Context, ids []uint64, now time.Time) 
 	return nil
 }
 
-// MarkFailed 记录单条事件投递失败：递增 retry_count 并更新退避时间；超过上限时置为死信 status=2。
+// MarkFailed 记录单条事件投递失败：更新 retry_count、退避时间与 last_error；仅在超过上限（dead=true）时置为死信 status=2。
+// 当外部传入 dead=false 且保留原 retry_count 时，用于记录基础设施连接故障原因而不消耗重试预算。
 func (r *OutboxRepo) MarkFailed(ctx context.Context, id uint64, retryCount uint16, nextRetryAt time.Time, dead bool, lastErr string, now time.Time) error {
 	status := model.OutboxStatusPending
 	if dead {
@@ -97,7 +98,7 @@ func (r *OutboxRepo) MarkFailed(ctx context.Context, id uint64, retryCount uint1
 	trimmed := truncateUTF8Bytes(lastErr, maxOutboxLastErrorBytes)
 	if err := r.db.WithContext(ctx).
 		Model(&model.OutboxEvent{}).
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, model.OutboxStatusPending).
 		Updates(map[string]any{
 			"status":        status,
 			"retry_count":   retryCount,
