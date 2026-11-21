@@ -72,7 +72,7 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	postSvc := service.NewPostService(postRepo, feedRepo, st, detail, cfg.Cache)
 	feedSvc := service.NewFeedService(postRepo, feedRepo, postSvc, a.Rebuilder, local, cfg.Feed, cfg.Cache.LocalFirstPageTTL)
-	userSvc := service.NewUserService(userRepo, postRepo, postSvc, st, profileCache, cfg.User, cfg.Feed)
+	userSvc := service.NewUserService(userRepo, postRepo, postSvc, st, profileCache, cfg.User)
 	authSvc, err := service.NewAuthService(userRepo, sessionRepo, st, userSvc, cfg.Auth, cfg.User)
 	if err != nil {
 		_ = a.Close()

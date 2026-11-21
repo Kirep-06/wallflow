@@ -20,7 +20,11 @@ import (
 	"wallpaper-feed/internal/storage"
 )
 
-const userLockStripes = 256
+const (
+	userLockStripes      = 256
+	UserPostsPageDefault = 20
+	UserPostsPageMax     = 50
+)
 
 type PatchProfileReq struct {
 	Nickname  OptionalString `json:"nickname"`
@@ -40,7 +44,6 @@ type UserService struct {
 	storage      storage.Service
 	profileCache *cache.MultiLevel
 	userCfg      config.UserConfig
-	feedCfg      config.FeedConfig
 	locks        [userLockStripes]sync.Mutex
 	now          func() time.Time
 }
@@ -52,7 +55,6 @@ func NewUserService(
 	st storage.Service,
 	profileCache *cache.MultiLevel,
 	userCfg config.UserConfig,
-	feedCfg config.FeedConfig,
 ) *UserService {
 	return &UserService{
 		users:        users,
@@ -61,7 +63,6 @@ func NewUserService(
 		storage:      st,
 		profileCache: profileCache,
 		userCfg:      userCfg,
-		feedCfg:      feedCfg,
 		now:          time.Now,
 	}
 }
@@ -200,22 +201,15 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID uint64, req *Pat
 	return s.publicToDTO(pub), nil
 }
 
-// ListUserPosts 按游标分页返回指定用户的正常帖子列表。
+// ListUserPosts 按游标分页返回指定用户的正常帖子列表（遵循 OpenAPI 契约：默认 20，允许 1~50）。
 func (s *UserService) ListUserPosts(ctx context.Context, targetUserID uint64, rawCursor string, limit int) (*model.FeedPage, error) {
 	if targetUserID == 0 {
 		return nil, errno.ErrParam
 	}
 	if limit == 0 {
-		limit = s.feedCfg.PageDefault
-		if limit <= 0 {
-			limit = 20
-		}
+		limit = UserPostsPageDefault
 	}
-	maxLimit := s.feedCfg.PageMax
-	if maxLimit <= 0 {
-		maxLimit = 50
-	}
-	if limit < 1 || limit > maxLimit {
+	if limit < 1 || limit > UserPostsPageMax {
 		return nil, errno.ErrParam
 	}
 

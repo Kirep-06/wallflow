@@ -65,7 +65,7 @@ func (h *UserHandler) ListPosts(c *gin.Context) {
 	if c.Request.URL.Query().Has("limit") {
 		raw := c.Query("limit")
 		v, err := strconv.Atoi(raw)
-		if err != nil || v < 1 || v > 50 {
+		if err != nil || v < 1 || v > service.UserPostsPageMax {
 			response.Error(c, errno.ErrParam)
 			return
 		}
