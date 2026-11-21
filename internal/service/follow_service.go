@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	followLockStripes     = 256
-	FollowListPageDefault = 20
-	FollowListPageMax     = 50
+	followLockStripes        = 256
+	FollowListPageDefault    = 20
+	FollowListPageMax        = 50
+	defaultInvalidateTimeout = 2 * time.Second
 )
 
 // UserProfileReader 抽象用户存在性校验与公开资料批量读取能力（由 UserService 实现）。
@@ -30,12 +31,13 @@ type UserProfileReader interface {
 }
 
 type FollowService struct {
-	follows    FollowStore
-	users      UserProfileReader
-	statsCache *cache.MultiLevel
-	cfg        config.FollowConfig
-	locks      [followLockStripes]sync.Mutex
-	now        func() time.Time
+	follows           FollowStore
+	users             UserProfileReader
+	statsCache        *cache.MultiLevel
+	cfg               config.FollowConfig
+	locks             [followLockStripes]sync.Mutex
+	invalidateTimeout time.Duration
+	now               func() time.Time
 }
 
 func NewFollowService(
@@ -45,11 +47,12 @@ func NewFollowService(
 	cfg config.FollowConfig,
 ) *FollowService {
 	return &FollowService{
-		follows:    follows,
-		users:      users,
-		statsCache: statsCache,
-		cfg:        cfg,
-		now:        time.Now,
+		follows:           follows,
+		users:             users,
+		statsCache:        statsCache,
+		cfg:               cfg,
+		invalidateTimeout: defaultInvalidateTimeout,
+		now:               time.Now,
 	}
 }
 
@@ -62,12 +65,46 @@ func (s *FollowService) InvalidateStats(ctx context.Context, userID uint64) {
 	if userID == 0 {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	mu := s.statsLock(userID)
 	mu.Lock()
 	defer mu.Unlock()
 
 	if err := s.statsCache.Delete(ctx, userID); err != nil {
 		slog.WarnContext(ctx, "delete follow stats l2 cache failed", "user_id", userID, "err", err)
+	}
+}
+
+// invalidateAfterCommit 在关注/取关提交且关系确实变化后清理双方计数缓存。
+// 基于 context.WithoutCancel 与原请求取消解耦，逐个用户持锁后在独立短超时内清理，
+// 既防止客户端提前断开遗留旧 L2 缓存，也避免并持两把条纹锁或一方故障阻断另一方清理。
+func (s *FollowService) invalidateAfterCommit(ctx context.Context, followerID, followeeID uint64) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	baseCtx := context.WithoutCancel(ctx)
+	s.invalidateStatsBounded(baseCtx, followerID)
+	s.invalidateStatsBounded(baseCtx, followeeID)
+}
+
+func (s *FollowService) invalidateStatsBounded(baseCtx context.Context, userID uint64) {
+	if userID == 0 {
+		return
+	}
+	timeout := s.invalidateTimeout
+	if timeout <= 0 {
+		timeout = defaultInvalidateTimeout
+	}
+	mu := s.statsLock(userID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	cleanCtx, cancel := context.WithTimeout(baseCtx, timeout)
+	defer cancel()
+	if err := s.statsCache.Delete(cleanCtx, userID); err != nil {
+		slog.WarnContext(cleanCtx, "delete follow stats l2 cache failed", "user_id", userID, "err", err)
 	}
 }
 
@@ -150,9 +187,7 @@ func (s *FollowService) Follow(ctx context.Context, followerID, followeeID uint6
 		return err
 	}
 	if changed {
-		// 分别按单用户失效，不同时持有两把条纹锁，杜绝同桶/交叉内存锁死锁。
-		s.InvalidateStats(ctx, followerID)
-		s.InvalidateStats(ctx, followeeID)
+		s.invalidateAfterCommit(ctx, followerID, followeeID)
 	}
 	return nil
 }
@@ -182,8 +217,7 @@ func (s *FollowService) Unfollow(ctx context.Context, followerID, followeeID uin
 		return err
 	}
 	if changed {
-		s.InvalidateStats(ctx, followerID)
-		s.InvalidateStats(ctx, followeeID)
+		s.invalidateAfterCommit(ctx, followerID, followeeID)
 	}
 	return nil
 }

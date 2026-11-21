@@ -204,19 +204,21 @@ func openMySQL(ctx context.Context, cfg config.MySQLConfig) (*gorm.DB, error) {
 
 func openRedis(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
 	return openRedisWithOptions(ctx, &redis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		Addr:                  cfg.Addr,
+		Password:              cfg.Password,
+		DB:                    cfg.DB,
+		ContextTimeoutEnabled: true,
 	})
 }
 
 // openRedisNoRetry 创建禁用自动重试的 Redis 客户端，避免刷新轮换脚本在结果未知时被重发。
 func openRedisNoRetry(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
 	return openRedisWithOptions(ctx, &redis.Options{
-		Addr:       cfg.Addr,
-		Password:   cfg.Password,
-		DB:         cfg.DB,
-		MaxRetries: -1,
+		Addr:                  cfg.Addr,
+		Password:              cfg.Password,
+		DB:                    cfg.DB,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
 	})
 }
 
