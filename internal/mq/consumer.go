@@ -65,7 +65,7 @@ func (c *Consumer) Run(ctx context.Context, handler HandlerFunc) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		conn, err := c.client.WaitConnection(ctx)
+		mc, err := c.client.waitManagedConnection(ctx)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, ErrClientClosed) {
 				return nil
@@ -74,37 +74,13 @@ func (c *Consumer) Run(ctx context.Context, handler HandlerFunc) error {
 			continue
 		}
 
-		ch, err := conn.Channel()
+		ch, deliveries, err := c.openConsumerChannel(ctx, mc)
 		if err != nil {
-			slog.Warn("open consumer channel failed", "err", err)
-			c.client.ReportError(conn)
-			if !sleepCtx(ctx, time.Second) {
+			if ctx.Err() != nil {
 				return nil
 			}
-			continue
-		}
-		if err := ch.Qos(c.prefetch, 0, false); err != nil {
-			_ = ch.Close()
-			slog.Warn("set consumer qos failed", "err", err)
-			c.client.ReportError(conn)
-			if !sleepCtx(ctx, time.Second) {
-				return nil
-			}
-			continue
-		}
-		deliveries, err := ch.Consume(
-			c.cfg.FanoutQueue,
-			c.consumerTag,
-			false, // autoAck
-			false, // exclusive
-			false, // noLocal
-			false, // noWait
-			nil,
-		)
-		if err != nil {
-			_ = ch.Close()
-			slog.Warn("start amqp consume failed", "queue", c.cfg.FanoutQueue, "err", err)
-			c.client.ReportError(conn)
+			slog.Warn("open consumer channel failed", "queue", c.cfg.FanoutQueue, "err", err)
+			c.client.ReportError(mc.amqpConn)
 			if !sleepCtx(ctx, time.Second) {
 				return nil
 			}
@@ -132,19 +108,22 @@ func (c *Consumer) Run(ctx context.Context, handler HandlerFunc) error {
 
 		select {
 		case <-doneCh:
-			_ = ch.Close()
+			_ = mc.closeChannelBounded(ch, c.client.closeTimeout)
 			if ctx.Err() != nil {
 				return nil
 			}
 			slog.Warn("amqp delivery stream closed, reconnecting", "queue", c.cfg.FanoutQueue)
-			c.client.ReportError(conn)
+			c.client.ReportError(mc.amqpConn)
 			if !sleepCtx(ctx, time.Second) {
 				return nil
 			}
 		case <-ctx.Done():
 			slog.Info("amqp consumer shutting down, cancelling tag", "queue", c.cfg.FanoutQueue, "tag", c.consumerTag)
-			if err := ch.Cancel(c.consumerTag, false); err != nil {
-				slog.Warn("amqp consumer cancel failed", "queue", c.cfg.FanoutQueue, "err", err)
+			cancelTimer := time.AfterFunc(c.client.closeTimeout, mc.forceClose)
+			cancelErr := ch.Cancel(c.consumerTag, false)
+			cancelTimer.Stop()
+			if cancelErr != nil {
+				slog.Warn("amqp consumer cancel failed", "queue", c.cfg.FanoutQueue, "err", cancelErr)
 			}
 			timer := time.NewTimer(consumerDrainTimeout)
 			select {
@@ -153,11 +132,41 @@ func (c *Consumer) Run(ctx context.Context, handler HandlerFunc) error {
 			case <-timer.C:
 				slog.Warn("amqp consumer drain timeout, closing channel", "queue", c.cfg.FanoutQueue)
 			}
-			_ = ch.Close()
+			_ = mc.closeChannelBounded(ch, c.client.closeTimeout)
 			slog.Info("amqp consumer stopped", "queue", c.cfg.FanoutQueue)
 			return nil
 		}
 	}
+}
+
+func (c *Consumer) openConsumerChannel(ctx context.Context, mc *managedConn) (*amqp.Channel, <-chan amqp.Delivery, error) {
+	setupCtx, cancel := context.WithTimeout(ctx, c.client.setupTimeout)
+	defer cancel()
+	stopWatch := context.AfterFunc(setupCtx, mc.forceClose)
+	defer stopWatch()
+
+	ch, err := mc.amqpConn.Channel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("channel: %w", err)
+	}
+	if err := ch.Qos(c.prefetch, 0, false); err != nil {
+		_ = mc.closeChannelBounded(ch, c.client.closeTimeout)
+		return nil, nil, fmt.Errorf("qos: %w", err)
+	}
+	deliveries, err := ch.Consume(
+		c.cfg.FanoutQueue,
+		c.consumerTag,
+		false, // autoAck
+		false, // exclusive
+		false, // noLocal
+		false, // noWait
+		nil,
+	)
+	if err != nil {
+		_ = mc.closeChannelBounded(ch, c.client.closeTimeout)
+		return nil, nil, fmt.Errorf("consume: %w", err)
+	}
+	return ch, deliveries, nil
 }
 
 func (c *Consumer) processDelivery(rootCtx context.Context, d amqp.Delivery, handler HandlerFunc) {
