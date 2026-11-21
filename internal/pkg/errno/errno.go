@@ -34,4 +34,7 @@ var (
 	ErrPostContentLong  = &Error{Code: 30002, Message: "文案过长", HTTP: 400}
 	ErrPostImageCount   = &Error{Code: 30003, Message: "图片数量需为 1~9 张", HTTP: 400}
 	ErrPostImageInvalid = &Error{Code: 30004, Message: "图片无效", HTTP: 400}
+
+	ErrFollowSelf          = &Error{Code: 40001, Message: "不能关注自己", HTTP: 400}
+	ErrFollowLimitExceeded = &Error{Code: 40002, Message: "关注人数已达上限", HTTP: 400}
 )

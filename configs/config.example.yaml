@@ -41,6 +41,11 @@ user:
   profile_local_ttl: 30       # 秒
   profile_redis_ttl: 1800     # 秒（±10% 抖动）
 
+follow:
+  max_following: 2000         # 单用户最大关注数上限
+  stats_local_ttl: 15         # 计数 L1 缓存 TTL（秒）
+  stats_redis_ttl: 600        # 计数 L2 缓存 TTL（秒，±10% 抖动）
+
 storage:
   provider: qiniu
   bucket: "wallpaper-community"

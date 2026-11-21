@@ -19,6 +19,7 @@ type Config struct {
 	Feed    FeedConfig    `mapstructure:"feed"`
 	Auth    AuthConfig    `mapstructure:"auth"`
 	User    UserConfig    `mapstructure:"user"`
+	Follow  FollowConfig  `mapstructure:"follow"`
 	Storage StorageConfig `mapstructure:"storage"`
 	Worker  WorkerConfig  `mapstructure:"worker"`
 }
@@ -95,6 +96,26 @@ type UserConfig struct {
 	ProfileRedisTTL  int    `mapstructure:"profile_redis_ttl"`
 }
 
+type FollowConfig struct {
+	MaxFollowing  int `mapstructure:"max_following"`
+	StatsLocalTTL int `mapstructure:"stats_local_ttl"`
+	StatsRedisTTL int `mapstructure:"stats_redis_ttl"`
+}
+
+// Validate 校验关注模块配置项均为正整数。
+func (f FollowConfig) Validate() error {
+	if f.MaxFollowing <= 0 {
+		return fmt.Errorf("follow.max_following (%d) must be positive", f.MaxFollowing)
+	}
+	if f.StatsLocalTTL <= 0 {
+		return fmt.Errorf("follow.stats_local_ttl (%d) must be positive", f.StatsLocalTTL)
+	}
+	if f.StatsRedisTTL <= 0 {
+		return fmt.Errorf("follow.stats_redis_ttl (%d) must be positive", f.StatsRedisTTL)
+	}
+	return nil
+}
+
 type StorageConfig struct {
 	Provider           string `mapstructure:"provider"`
 	Bucket             string `mapstructure:"bucket"`
@@ -128,6 +149,9 @@ func Load(path string) (*Config, error) {
 	}
 	// JWT 密钥仅允许通过 WF_AUTH_JWT_SECRET 环境变量注入，忽略配置文件中的静态值。
 	cfg.Auth.JWTSecret = os.Getenv("WF_AUTH_JWT_SECRET")
+	if err := cfg.Follow.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid follow config: %w", err)
+	}
 	return &cfg, nil
 }
 
@@ -154,6 +178,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("user.default_avatar_key", "avatars/default.png")
 	v.SetDefault("user.profile_local_ttl", 30)
 	v.SetDefault("user.profile_redis_ttl", 1800)
+	v.SetDefault("follow.max_following", 2000)
+	v.SetDefault("follow.stats_local_ttl", 15)
+	v.SetDefault("follow.stats_redis_ttl", 600)
 	v.SetDefault("storage.provider", "qiniu")
 	v.SetDefault("storage.token_expire_seconds", 3600)
 	v.SetDefault("storage.max_file_size_mb", 20)
