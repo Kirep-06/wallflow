@@ -25,21 +25,37 @@ type App struct {
 	Cfg        *config.Config
 	DB         *gorm.DB
 	Redis      *redis.Client
+	AuthRedis  *redis.Client // 关闭自动重试，专供会话轮换等非幂等 Lua 命令使用
 	Rebuilder  *service.LatestRebuilder
 	Router     *gin.Engine
 	Reconciler *consumer.LatestReconciler
 }
 
-// NewAPI 初始化 API 进程所需的全部依赖（含 L1 gocache 与 HTTP 路由）。
+// NewAPI 初始化 API 进程所需的全部依赖（含 L1 gocache、认证与 HTTP 路由）。
 func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
+	if err := cfg.Auth.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid auth config: %w", err)
+	}
 	a, postRepo, feedRepo, err := newBase(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	authRedis, err := openRedisNoRetry(ctx, cfg.Redis)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+	a.AuthRedis = authRedis
+
 	local := gocache.NewCache(cfg.Cache.LocalSizeMB << 20)
 	detail := cache.NewMultiLevel(local, a.Redis, cache.Options{
 		Prefix:   "post:detail:",
 		LocalTTL: time.Duration(cfg.Cache.LocalDetailTTL) * time.Second,
+		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
+	})
+	profileCache := cache.NewMultiLevel(local, a.Redis, cache.Options{
+		Prefix:   "user:profile:",
+		LocalTTL: time.Duration(cfg.User.ProfileLocalTTL) * time.Second,
 		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
 	})
 	st, err := newStorage(cfg.Storage)
@@ -47,9 +63,25 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		_ = a.Close()
 		return nil, err
 	}
+	userRepo := repository.NewUserRepo(a.DB)
+	sessionRepo := repository.NewAuthSessionRepo(a.AuthRedis)
+
 	postSvc := service.NewPostService(postRepo, feedRepo, st, detail, cfg.Cache)
 	feedSvc := service.NewFeedService(postRepo, feedRepo, postSvc, a.Rebuilder, local, cfg.Feed, cfg.Cache.LocalFirstPageTTL)
-	a.Router = handler.NewRouter(cfg.App.IsDev(), handler.NewPostHandler(postSvc), handler.NewFeedHandler(feedSvc))
+	userSvc := service.NewUserService(userRepo, postRepo, postSvc, st, profileCache, cfg.User, cfg.Feed)
+	authSvc, err := service.NewAuthService(userRepo, sessionRepo, st, userSvc, cfg.Auth, cfg.User)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+	a.Router = handler.NewRouter(
+		cfg.App.IsDev(),
+		authSvc,
+		handler.NewAuthHandler(authSvc),
+		handler.NewUserHandler(userSvc),
+		handler.NewPostHandler(postSvc),
+		handler.NewFeedHandler(feedSvc),
+	)
 	return a, nil
 }
 
@@ -91,6 +123,11 @@ func newBase(ctx context.Context, cfg *config.Config) (*App, *repository.PostRep
 
 func (a *App) Close() error {
 	var firstErr error
+	if a.AuthRedis != nil {
+		if err := a.AuthRedis.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if a.Redis != nil {
 		if err := a.Redis.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -128,11 +165,25 @@ func openMySQL(ctx context.Context, cfg config.MySQLConfig) (*gorm.DB, error) {
 }
 
 func openRedis(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
-	rdb := redis.NewClient(&redis.Options{
+	return openRedisWithOptions(ctx, &redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	})
+}
+
+// openRedisNoRetry 创建禁用自动重试的 Redis 客户端，避免刷新轮换脚本在结果未知时被重发。
+func openRedisNoRetry(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
+	return openRedisWithOptions(ctx, &redis.Options{
+		Addr:       cfg.Addr,
+		Password:   cfg.Password,
+		DB:         cfg.DB,
+		MaxRetries: -1,
+	})
+}
+
+func openRedisWithOptions(ctx context.Context, opt *redis.Options) (*redis.Client, error) {
+	rdb := redis.NewClient(opt)
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := rdb.Ping(pingCtx).Err(); err != nil {

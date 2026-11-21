@@ -18,7 +18,7 @@ var AllowedMimes = []string{"image/jpeg", "image/png", "image/webp"}
 
 const thumbSuffix = "?imageView2/2/w/400/format/webp"
 
-// returnBody 由七牛在上传成功后原样返回给客户端，客户端再提交到创建帖子接口。
+// returnBody 由七牛在上传成功后原样返回给客户端，客户端再提交到发帖或资料更新接口。
 const returnBody = `{"key":"$(key)","size":$(fsize),"mime":"$(mimeType)","width":$(imageInfo.width),"height":$(imageInfo.height)}`
 
 type Qiniu struct {
@@ -36,22 +36,49 @@ func NewQiniu(cfg config.StorageConfig) *Qiniu {
 	}
 }
 
-func (q *Qiniu) UploadToken(_ context.Context) (*UploadToken, error) {
-	policy := qnstorage.PutPolicy{
-		Scope:        q.cfg.Bucket,
-		SaveKey:      KeyPrefix + "$(year)/$(mon)/$(etag)$(ext)",
-		ForceSaveKey: true,
-		FsizeLimit:   int64(q.cfg.MaxFileSizeMB) << 20,
-		MimeLimit:    strings.Join(AllowedMimes, ";"),
-		DetectMime:   1,
-		ReturnBody:   returnBody,
-		Expires:      uint64(q.cfg.TokenExpireSeconds),
+func (q *Qiniu) UploadToken(_ context.Context, scene UploadScene, userID uint64) (*UploadToken, error) {
+	policy, err := q.buildPutPolicy(scene, userID)
+	if err != nil {
+		return nil, err
 	}
 	return &UploadToken{
 		Token:     policy.UploadToken(q.cred),
 		UploadURL: q.cfg.UploadURL,
 		ExpiresIn: q.cfg.TokenExpireSeconds,
 	}, nil
+}
+
+func (q *Qiniu) buildPutPolicy(scene UploadScene, userID uint64) (qnstorage.PutPolicy, error) {
+	switch scene {
+	case UploadScenePost:
+		return qnstorage.PutPolicy{
+			Scope:        q.cfg.Bucket,
+			SaveKey:      KeyPrefix + "$(year)/$(mon)/$(etag)$(ext)",
+			ForceSaveKey: true,
+			FsizeLimit:   int64(q.cfg.MaxFileSizeMB) << 20,
+			MimeLimit:    strings.Join(AllowedMimes, ";"),
+			DetectMime:   1,
+			ReturnBody:   returnBody,
+			Expires:      uint64(q.cfg.TokenExpireSeconds),
+		}, nil
+	case UploadSceneAvatar:
+		if userID == 0 {
+			return qnstorage.PutPolicy{}, fmt.Errorf("avatar upload token requires non-zero user_id")
+		}
+		return qnstorage.PutPolicy{
+			Scope:        q.cfg.Bucket,
+			SaveKey:      fmt.Sprintf("%s%d/$(year)/$(mon)/$(etag)$(ext)", AvatarKeyPrefix, userID),
+			ForceSaveKey: true,
+			InsertOnly:   1,
+			FsizeLimit:   AvatarMaxSizeBytes,
+			MimeLimit:    strings.Join(AllowedMimes, ";"),
+			DetectMime:   1,
+			ReturnBody:   returnBody,
+			Expires:      uint64(q.cfg.TokenExpireSeconds),
+		}, nil
+	default:
+		return qnstorage.PutPolicy{}, fmt.Errorf("unsupported upload scene %q", scene)
+	}
 }
 
 func (q *Qiniu) Stat(_ context.Context, key string) (*ObjectInfo, error) {

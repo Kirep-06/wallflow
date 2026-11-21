@@ -52,8 +52,14 @@ func NewPostService(store PostStore, feed *repository.LatestFeedRepo, st storage
 	return &PostService{store: store, feed: feed, storage: st, detail: detail, cfg: cfg}
 }
 
-func (s *PostService) UploadToken(ctx context.Context) (*storage.UploadToken, error) {
-	return s.storage.UploadToken(ctx)
+func (s *PostService) UploadToken(ctx context.Context, scene storage.UploadScene, userID uint64) (*storage.UploadToken, error) {
+	if scene == "" {
+		scene = storage.UploadScenePost
+	}
+	if scene != storage.UploadScenePost && scene != storage.UploadSceneAvatar {
+		return nil, errno.ErrParam.WithMsg("不支持的上传场景")
+	}
+	return s.storage.UploadToken(ctx, scene, userID)
 }
 
 // Create 发帖：校验 → 确认对象存在 → 事务写 MySQL → 尽力写入最新流热窗口。
