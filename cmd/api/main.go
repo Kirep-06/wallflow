@@ -33,10 +33,22 @@ func main() {
 		slog.Error("init api failed", "err", err)
 		os.Exit(1)
 	}
-	defer func() { _ = a.Close() }()
+	defer func() {
+		if err := a.Close(); err != nil {
+			slog.Warn("close api resources failed", "err", err)
+		}
+	}()
 
 	// 启动时若热窗口尚未就绪则异步重建
 	a.Rebuilder.TriggerAsync()
+
+	// 启动进程内 OutboxRelay（先停 HTTP Server，再停 Relay 排空收尾，避免停机前新发帖遗漏唤醒）
+	relayCtx, relayCancel := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		a.OutboxRelay.Run(relayCtx)
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
@@ -65,8 +77,17 @@ func main() {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("api graceful shutdown failed", "err", err)
 	}
+
+	relayCancel()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		slog.Warn("outbox relay shutdown timeout")
+	}
+
 	slog.Info("api stopped")
 }

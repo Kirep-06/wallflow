@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"wallpaper-feed/internal/app"
 	"wallpaper-feed/internal/config"
 )
@@ -30,9 +32,35 @@ func main() {
 		slog.Error("init worker failed", "err", err)
 		os.Exit(1)
 	}
-	defer func() { _ = a.Close() }()
+	defer func() {
+		if err := a.Close(); err != nil {
+			slog.Warn("close worker resources failed", "err", err)
+		}
+	}()
 
-	slog.Info("worker started", "reconcile_interval_sec", cfg.Worker.ReconcileIntervalSeconds)
-	a.Reconciler.Run(ctx)
+	slog.Info("worker started",
+		"reconcile_interval_sec", cfg.Worker.ReconcileIntervalSeconds,
+		"outbox_cleanup_interval_sec", cfg.Worker.OutboxCleanupIntervalSeconds,
+		"fanout_prefetch", cfg.Worker.FanoutPrefetch,
+		"fanout_concurrency", cfg.Worker.FanoutConcurrency,
+		"fanout_batch_size", cfg.Worker.FanoutBatchSize,
+	)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		a.Reconciler.Run(gctx)
+		return nil
+	})
+	g.Go(func() error {
+		return a.FollowingFanout.Run(gctx)
+	})
+	g.Go(func() error {
+		a.FollowingMaintainer.Run(gctx)
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		slog.Error("worker exited with error", "err", err)
+	}
 	slog.Info("worker stopped")
 }

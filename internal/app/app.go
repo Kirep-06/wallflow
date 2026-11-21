@@ -20,28 +20,43 @@ import (
 	"wallpaper-feed/internal/config"
 	"wallpaper-feed/internal/consumer"
 	"wallpaper-feed/internal/handler"
+	"wallpaper-feed/internal/mq"
 	"wallpaper-feed/internal/repository"
 	"wallpaper-feed/internal/service"
 	"wallpaper-feed/internal/storage"
 )
 
 type App struct {
-	Cfg        *config.Config
-	DB         *gorm.DB
-	Redis      *redis.Client
-	AuthRedis  *redis.Client // 关闭自动重试，专供会话轮换等非幂等 Lua 命令使用
-	Rebuilder  *service.LatestRebuilder
-	Router     *gin.Engine
-	Reconciler *consumer.LatestReconciler
+	Cfg                 *config.Config
+	DB                  *gorm.DB
+	Redis               *redis.Client
+	AuthRedis           *redis.Client // 关闭自动重试，专供会话轮换等非幂等 Lua 命令使用
+	MQ                  *mq.Client
+	MQPub               *mq.ConfirmPublisher
+	Rebuilder           *service.LatestRebuilder
+	OutboxRelay         *consumer.OutboxRelay
+	Router              *gin.Engine
+	Reconciler          *consumer.LatestReconciler
+	FollowingFanout     *consumer.FollowingFanoutConsumer
+	FollowingMaintainer *consumer.FollowingMaintainer
 }
 
-// NewAPI 初始化 API 进程所需的全部依赖（含 L1 gocache、认证与 HTTP 路由）。
+// NewAPI 初始化 API 进程所需的全部依赖（含 L1 gocache、认证、RabbitMQ OutboxRelay 与 HTTP 路由）。
 func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 	if err := cfg.Auth.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid auth config: %w", err)
 	}
 	if err := cfg.Follow.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid follow config: %w", err)
+	}
+	if err := cfg.FollowingFeed.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid following_feed config: %w", err)
+	}
+	if err := cfg.Outbox.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid outbox config: %w", err)
+	}
+	if err := cfg.RabbitMQ.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid rabbitmq config: %w", err)
 	}
 	a, postRepo, feedRepo, err := newBase(ctx, cfg)
 	if err != nil {
@@ -53,6 +68,14 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 	a.AuthRedis = authRedis
+
+	mqClient, err := mq.NewClient(cfg.RabbitMQ)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+	a.MQ = mqClient
+	a.MQPub = mq.NewConfirmPublisher(mqClient)
 
 	local := gocache.NewCache(cfg.Cache.LocalSizeMB << 20)
 	detail := cache.NewMultiLevel(local, a.Redis, cache.Options{
@@ -70,6 +93,11 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		LocalTTL: time.Duration(cfg.Follow.StatsLocalTTL) * time.Second,
 		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
 	})
+	followingIDsCache := cache.NewMultiLevel(local, a.Redis, cache.Options{
+		Prefix:   "feed:following_ids:",
+		LocalTTL: time.Duration(cfg.FollowingFeed.FollowingIDsLocalTTL) * time.Second,
+		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
+	})
 	st, err := newStorage(cfg.Storage)
 	if err != nil {
 		_ = a.Close()
@@ -77,12 +105,19 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 	userRepo := repository.NewUserRepo(a.DB)
 	followRepo := repository.NewFollowRepo(a.DB)
+	outboxRepo := repository.NewOutboxRepo(a.DB)
+	followingFeedRepo := repository.NewFollowingFeedRepo(a.Redis, cfg.FollowingFeed)
 	sessionRepo := repository.NewAuthSessionRepo(a.AuthRedis)
 
+	a.OutboxRelay = consumer.NewOutboxRelay(outboxRepo, a.MQPub, cfg.Outbox)
+
 	postSvc := service.NewPostService(postRepo, feedRepo, st, detail, cfg.Cache)
+	postSvc.SetOutbox(cfg.RabbitMQ.Exchange, a.OutboxRelay)
 	feedSvc := service.NewFeedService(postRepo, feedRepo, postSvc, a.Rebuilder, local, cfg.Feed, cfg.Cache.LocalFirstPageTTL)
+	followingFeedSvc := service.NewFollowingFeedService(postRepo, followRepo, followingFeedRepo, postSvc, followingIDsCache, cfg.Feed, cfg.FollowingFeed)
 	userSvc := service.NewUserService(userRepo, postRepo, postSvc, st, profileCache, cfg.User)
 	followSvc := service.NewFollowService(followRepo, userSvc, followStatsCache, cfg.Follow)
+	followSvc.SetFollowingFeedHook(followingFeedSvc, cfg.FollowingFeed.BigVThreshold)
 	userSvc.SetFollowReader(followSvc)
 	authSvc, err := service.NewAuthService(userRepo, sessionRepo, st, userSvc, cfg.Auth, cfg.User)
 	if err != nil {
@@ -96,22 +131,60 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		handler.NewUserHandler(userSvc),
 		handler.NewFollowHandler(followSvc),
 		handler.NewPostHandler(postSvc),
-		handler.NewFeedHandler(feedSvc),
+		handler.NewFeedHandler(feedSvc, followingFeedSvc),
 	)
 	return a, nil
 }
 
 // NewWorker 初始化 Worker 进程所需的依赖（不分配 L1 本地缓存）。
 func NewWorker(ctx context.Context, cfg *config.Config) (*App, error) {
+	if err := cfg.Follow.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid follow config: %w", err)
+	}
+	if err := cfg.FollowingFeed.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid following_feed config: %w", err)
+	}
+	if err := cfg.Outbox.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid outbox config: %w", err)
+	}
+	if err := cfg.Worker.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid worker config: %w", err)
+	}
+	if err := cfg.RabbitMQ.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid rabbitmq config: %w", err)
+	}
 	a, _, _, err := newBase(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	interval := time.Duration(cfg.Worker.ReconcileIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = time.Minute
+	mqClient, err := mq.NewClient(cfg.RabbitMQ)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
 	}
-	a.Reconciler = consumer.NewLatestReconciler(a.Rebuilder, interval)
+	a.MQ = mqClient
+
+	followRepo := repository.NewFollowRepo(a.DB)
+	outboxRepo := repository.NewOutboxRepo(a.DB)
+	followingFeedRepo := repository.NewFollowingFeedRepo(a.Redis, cfg.FollowingFeed)
+
+	reconcileInterval := time.Duration(cfg.Worker.ReconcileIntervalSeconds) * time.Second
+	cleanupInterval := time.Duration(cfg.Worker.OutboxCleanupIntervalSeconds) * time.Second
+	a.Reconciler = consumer.NewLatestReconciler(a.Rebuilder, reconcileInterval)
+	a.FollowingFanout = consumer.NewFollowingFanoutConsumer(
+		mq.NewConsumer(a.MQ, cfg.RabbitMQ, cfg.Worker),
+		followRepo,
+		followingFeedRepo,
+		cfg.Worker.FanoutBatchSize,
+	)
+	a.FollowingMaintainer = consumer.NewFollowingMaintainer(
+		followRepo,
+		outboxRepo,
+		followingFeedRepo,
+		reconcileInterval,
+		cleanupInterval,
+		cfg.Outbox.RetentionDays,
+	)
 	return a, nil
 }
 
@@ -139,6 +212,16 @@ func newBase(ctx context.Context, cfg *config.Config) (*App, *repository.PostRep
 
 func (a *App) Close() error {
 	var firstErr error
+	if a.MQPub != nil {
+		if err := a.MQPub.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if a.MQ != nil {
+		if err := a.MQ.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if a.AuthRedis != nil {
 		if err := a.AuthRedis.Close(); err != nil && firstErr == nil {
 			firstErr = err

@@ -36,7 +36,8 @@ func NewRouter(
 		v1.POST("/auth/login", auth.Login)
 		v1.POST("/auth/refresh", auth.Refresh)
 		v1.GET("/posts/:id", post.Get)
-		v1.GET("/feed/latest", feed.Latest)
+		v1.GET("/feed/latest", feed.Latest)  // M01 兼容路由
+		v1.GET("/feeds/latest", feed.Latest) // 规范路由对齐
 		v1.GET("/users/:id/posts", user.ListPosts)
 
 		// 可选鉴权路由
@@ -55,6 +56,7 @@ func NewRouter(
 		authed.POST("/upload-tokens", post.CreateUploadToken)
 		authed.GET("/upload/token", post.UploadToken) // 模块 01 兼容路由（固定帖子上传，200）
 		authed.POST("/posts", post.Create)
+		authed.GET("/feeds/following", feed.Following)
 	}
 	return r
 }
