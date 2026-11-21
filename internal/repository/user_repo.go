@@ -30,6 +30,9 @@ func (r *UserRepo) Create(ctx context.Context, u *model.User) error {
 		}
 		return fmt.Errorf("insert user: %w", err)
 	}
+	if u.ID == 0 {
+		return fmt.Errorf("insert user: zero primary key returned")
+	}
 	return nil
 }
 
