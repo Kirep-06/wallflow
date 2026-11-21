@@ -1,0 +1,43 @@
+# 复制为 configs/config.local.yaml 后修改；敏感项用环境变量注入（WF_ 前缀，例如 WF_STORAGE_SECRET_KEY）
+app:
+  env: dev # dev 时启用 X-User-ID 临时鉴权
+
+http:
+  addr: ":8080"
+  shutdown_timeout_seconds: 10
+
+mysql:
+  dsn: "root:password@tcp(127.0.0.1:3306)/wallpaper_feed?charset=utf8mb4&parseTime=true&loc=Local"
+  max_open_conns: 20
+  max_idle_conns: 10
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+cache:
+  local_size_mb: 64
+  local_detail_ttl: 30
+  local_first_page_ttl: 2
+  redis_hot_ttl: 3600
+  redis_cold_ttl: 600
+  redis_null_ttl: 60
+
+feed:
+  latest_hot_size: 1000
+  page_default: 20
+  page_max: 50
+
+storage:
+  provider: qiniu
+  bucket: "wallpaper-community"
+  access_key: ""   # WF_STORAGE_ACCESS_KEY
+  secret_key: ""   # WF_STORAGE_SECRET_KEY
+  cdn_domain: "https://wp.kirep.top"
+  upload_url: "https://up-z0.qiniup.com"
+  token_expire_seconds: 3600
+  max_file_size_mb: 20
+
+worker:
+  reconcile_interval_seconds: 60
