@@ -40,6 +40,9 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 	if err := cfg.Auth.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid auth config: %w", err)
 	}
+	if err := cfg.Follow.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid follow config: %w", err)
+	}
 	a, postRepo, feedRepo, err := newBase(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -62,17 +65,25 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		LocalTTL: time.Duration(cfg.User.ProfileLocalTTL) * time.Second,
 		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
 	})
+	followStatsCache := cache.NewMultiLevel(local, a.Redis, cache.Options{
+		Prefix:   "follow:stats:",
+		LocalTTL: time.Duration(cfg.Follow.StatsLocalTTL) * time.Second,
+		NullTTL:  time.Duration(cfg.Cache.RedisNullTTL) * time.Second,
+	})
 	st, err := newStorage(cfg.Storage)
 	if err != nil {
 		_ = a.Close()
 		return nil, err
 	}
 	userRepo := repository.NewUserRepo(a.DB)
+	followRepo := repository.NewFollowRepo(a.DB)
 	sessionRepo := repository.NewAuthSessionRepo(a.AuthRedis)
 
 	postSvc := service.NewPostService(postRepo, feedRepo, st, detail, cfg.Cache)
 	feedSvc := service.NewFeedService(postRepo, feedRepo, postSvc, a.Rebuilder, local, cfg.Feed, cfg.Cache.LocalFirstPageTTL)
 	userSvc := service.NewUserService(userRepo, postRepo, postSvc, st, profileCache, cfg.User)
+	followSvc := service.NewFollowService(followRepo, userSvc, followStatsCache, cfg.Follow)
+	userSvc.SetFollowReader(followSvc)
 	authSvc, err := service.NewAuthService(userRepo, sessionRepo, st, userSvc, cfg.Auth, cfg.User)
 	if err != nil {
 		_ = a.Close()
@@ -83,6 +94,7 @@ func NewAPI(ctx context.Context, cfg *config.Config) (*App, error) {
 		authSvc,
 		handler.NewAuthHandler(authSvc),
 		handler.NewUserHandler(userSvc),
+		handler.NewFollowHandler(followSvc),
 		handler.NewPostHandler(postSvc),
 		handler.NewFeedHandler(feedSvc),
 	)
