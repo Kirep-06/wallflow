@@ -56,5 +56,39 @@ storage:
   token_expire_seconds: 3600
   max_file_size_mb: 20
 
+rabbitmq:
+  url: ""                         # 必填（生产环境通过环境变量 WF_RABBITMQ_URL 注入，日志脱敏不输出凭据）
+  exchange: "wallpaper.events"
+  dlx_exchange: "wallpaper.dlx"
+  fanout_queue: "feed.following.fanout"
+  retry_queue: "feed.following.fanout.retry"
+  dlq_queue: "feed.following.fanout.dlq"
+  retry_delay_ms: 5000            # 消费失败延迟重试间隔（毫秒）
+  max_consume_retries: 5          # 消费最大重试次数，超过进 DLQ
+
+following_feed:
+  bigv_threshold: 5000            # 大 V 晋升粉丝数阈值（只升不自动降）
+  inbox_hot_size: 500             # 普通作者收件箱热窗口条数（不含哨兵）
+  outbox_hot_size: 200            # 大 V 发件箱热窗口条数（不含哨兵）
+  inbox_ttl_seconds: 604800       # 收件箱 TTL（7 天，写入时 ±10% 抖动）
+  outbox_ttl_seconds: 604800      # 发件箱 TTL（7 天，写入时 ±10% 抖动）
+  following_ids_local_ttl: 15     # 关注对象 ID 列表 L1 TTL（秒）
+  following_ids_redis_ttl: 600    # 关注对象 ID 列表 L2 TTL（秒，±10% 抖动）
+  bigv_local_ttl: 30              # 全站大 V 快照 L1 TTL（秒）
+  max_sync_outbox_rebuilds: 20    # 单次请求允许同步冷建的大 V 上限，超出则本次整体降级 MySQL
+  author_in_chunk_size: 200       # MySQL 分块 IN 查询批次大小
+
+outbox:
+  poll_interval_ms: 2000          # API OutboxRelay 兜底轮询间隔（毫秒）
+  batch_size: 50                  # 单批 Claim 事件数量
+  lease_seconds: 30               # 多实例防重复捞取租约（秒）
+  publish_timeout_ms: 5000        # 单条消息 Publisher Confirm 超时（毫秒）
+  max_retries: 10                 # 投递最大重试次数，超过标为 status=2 告警
+  retention_days: 7               # 已投递记录保留天数（Worker 定时清理）
+
 worker:
-  reconcile_interval_seconds: 60
+  reconcile_interval_seconds: 60        # 最新流 + 全站大 V 集合对账周期（秒）
+  outbox_cleanup_interval_seconds: 3600 # Outbox 已发送记录清理周期（秒）
+  fanout_prefetch: 8                    # RabbitMQ Channel QoS prefetch
+  fanout_concurrency: 4                 # 扇出消费并发协程数（受控有界）
+  fanout_batch_size: 500                # 单次扫描粉丝 ID 及 Pipeline 推送批次大小
