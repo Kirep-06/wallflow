@@ -49,6 +49,19 @@ func NewMultiLevel(local *gocache.Cache, rdb redis.UniversalClient, opt Options)
 
 func (m *MultiLevel) key(id uint64) string { return m.opt.Prefix + strconv.FormatUint(id, 10) }
 
+// GetLocal 仅从 L1 内存缓存只读试探单个 ID（不写缓存、无网络 I/O）。
+// 命中有效值返回 (val, true)，命中空值标记返回 (nil, true)，未命中返回 (nil, false)。
+func (m *MultiLevel) GetLocal(id uint64) ([]byte, bool) {
+	v, err := m.local.Get([]byte(m.key(id)))
+	if err != nil {
+		return nil, false
+	}
+	if bytes.Equal(v, NullMarker) {
+		return nil, true
+	}
+	return v, true
+}
+
 // GetMany 按 L1 → L2 → L3 顺序批量读取，命中下层后逐层回填。返回值只包含存在的 ID。
 // L2 故障时降级直接回源 L3，不向调用方报错；只有 L3 失败才返回 error。
 func (m *MultiLevel) GetMany(ctx context.Context, ids []uint64, load Loader, ttl TTLFunc) (map[uint64][]byte, error) {
