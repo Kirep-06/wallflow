@@ -185,6 +185,10 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID uint64, req *Pat
 		return nil, err
 	}
 
+	// MySQL 提交后立即删缓存，避免后续回读失败时跳过失效导致旧缓存残留；
+	// Redis 删除失败只记录日志并已清理本地值，不影响数据库回读返回已提交结果。
+	s.InvalidateProfile(ctx, userID)
+
 	pub, err := s.users.GetPublicByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -192,9 +196,6 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID uint64, req *Pat
 		}
 		return nil, err
 	}
-
-	// MySQL 提交后删缓存；Redis 删除失败只记录日志并已清理本地值，接口仍返回已提交结果。
-	s.InvalidateProfile(ctx, userID)
 
 	return s.publicToDTO(pub), nil
 }
