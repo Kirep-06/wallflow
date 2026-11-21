@@ -109,11 +109,13 @@ func (s *tinyFollowStore) mutate(a, b uint64, add bool) (bool, error) {
 	return changed, nil
 }
 
-func (s *tinyFollowStore) Follow(_ context.Context, a, b uint64, _ int, _ time.Time) (bool, error) {
-	return s.mutate(a, b, true)
+func (s *tinyFollowStore) Follow(_ context.Context, a, b uint64, _, _ int, _ time.Time) (model.FollowMutationResult, error) {
+	changed, err := s.mutate(a, b, true)
+	return model.FollowMutationResult{Changed: changed}, err
 }
-func (s *tinyFollowStore) Unfollow(_ context.Context, a, b uint64, _ time.Time) (bool, error) {
-	return s.mutate(a, b, false)
+func (s *tinyFollowStore) Unfollow(_ context.Context, a, b uint64, _ time.Time) (model.FollowMutationResult, error) {
+	changed, err := s.mutate(a, b, false)
+	return model.FollowMutationResult{Changed: changed}, err
 }
 func (s *tinyFollowStore) Exists(_ context.Context, a, b uint64) (bool, error) {
 	s.mu.Lock()

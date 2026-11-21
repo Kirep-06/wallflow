@@ -40,16 +40,29 @@ type CreateImageReq struct {
 	Mime   string `json:"mime"`
 }
 
+// OutboxNotifier 在发帖事务提交后非阻塞唤醒 OutboxRelay，实现毫秒级投递。
+type OutboxNotifier interface {
+	Notify()
+}
+
 type PostService struct {
-	store   PostStore
-	feed    *repository.LatestFeedRepo
-	storage storage.Service
-	detail  *cache.MultiLevel
-	cfg     config.CacheConfig
+	store          PostStore
+	feed           *repository.LatestFeedRepo
+	storage        storage.Service
+	detail         *cache.MultiLevel
+	cfg            config.CacheConfig
+	outboxExchange string
+	outboxNotifier OutboxNotifier
 }
 
 func NewPostService(store PostStore, feed *repository.LatestFeedRepo, st storage.Service, detail *cache.MultiLevel, cfg config.CacheConfig) *PostService {
 	return &PostService{store: store, feed: feed, storage: st, detail: detail, cfg: cfg}
+}
+
+// SetOutbox 装配发帖事件的 Outbox Exchange 名称与提交后唤醒器。
+func (s *PostService) SetOutbox(exchange string, notifier OutboxNotifier) {
+	s.outboxExchange = exchange
+	s.outboxNotifier = notifier
 }
 
 func (s *PostService) UploadToken(ctx context.Context, scene storage.UploadScene, userID uint64) (*storage.UploadToken, error) {
@@ -105,13 +118,44 @@ func (s *PostService) Create(ctx context.Context, userID uint64, req *CreatePost
 			CreatedAt: now,
 		})
 	}
-	if err := s.store.Create(ctx, post); err != nil {
+	var buildEvent func(p *model.Post) (*model.OutboxEvent, error)
+	if s.outboxExchange != "" {
+		exchange := s.outboxExchange
+		buildEvent = func(p *model.Post) (*model.OutboxEvent, error) {
+			eventID := fmt.Sprintf("%s:%d", model.EventTypePostCreated, p.ID)
+			payload, err := json.Marshal(model.PostCreatedEvent{
+				EventID:   eventID,
+				EventType: model.EventTypePostCreated,
+				PostID:    p.ID,
+				AuthorID:  p.UserID,
+				CreatedAt: p.CreatedAt.UnixMilli(),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal post created event: %w", err)
+			}
+			return &model.OutboxEvent{
+				EventID:      eventID,
+				ExchangeName: exchange,
+				RoutingKey:   model.EventTypePostCreated,
+				Payload:      string(payload),
+				Status:       model.OutboxStatusPending,
+				RetryCount:   0,
+				NextRetryAt:  p.CreatedAt,
+				CreatedAt:    p.CreatedAt,
+				UpdatedAt:    p.CreatedAt,
+			}, nil
+		}
+	}
+	if err := s.store.CreateWithOutbox(ctx, post, buildEvent); err != nil {
 		return nil, err
 	}
 
 	// MySQL 是唯一真实数据源：热窗口写失败只记日志，由 Worker 对账补齐。
 	if _, err := s.feed.Add(ctx, post.ID); err != nil {
 		slog.WarnContext(ctx, "add post to latest feed failed", "post_id", post.ID, "err", err)
+	}
+	if s.outboxNotifier != nil {
+		s.outboxNotifier.Notify()
 	}
 	return s.toDTO(model.NewPostCache(post)), nil
 }

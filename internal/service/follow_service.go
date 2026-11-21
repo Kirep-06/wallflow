@@ -30,11 +30,22 @@ type UserProfileReader interface {
 	GetPublicProfiles(ctx context.Context, ids []uint64) (map[uint64]*model.UserProfileDTO, error)
 }
 
+// FollowChangeHook 由模块 04 实现，用于关注关系变化后联动更新关注流缓存与全站大 V 集合。
+type FollowChangeHook interface {
+	// OnFollowChanged 在关注/取关事务实际生效（RowsAffected == 1）提交后调用。
+	// promotedBigV 为 true 表示本次关注使 followee 首次晋升为大 V。
+	OnFollowChanged(ctx context.Context, followerID, followeeID uint64, followeeIsBigV, promotedBigV bool)
+}
+
+const defaultBigVThreshold = 5000
+
 type FollowService struct {
 	follows           FollowStore
 	users             UserProfileReader
 	statsCache        *cache.MultiLevel
 	cfg               config.FollowConfig
+	bigVThreshold     int
+	changeHook        FollowChangeHook
 	locks             [followLockStripes]sync.Mutex
 	invalidateTimeout time.Duration
 	now               func() time.Time
@@ -51,8 +62,17 @@ func NewFollowService(
 		users:             users,
 		statsCache:        statsCache,
 		cfg:               cfg,
+		bigVThreshold:     defaultBigVThreshold,
 		invalidateTimeout: defaultInvalidateTimeout,
 		now:               time.Now,
+	}
+}
+
+// SetFollowingFeedHook 注入关注变更联动回调与大 V 晋升阈值（由装配层调用，避免循环依赖）。
+func (s *FollowService) SetFollowingFeedHook(hook FollowChangeHook, bigVThreshold int) {
+	s.changeHook = hook
+	if bigVThreshold > 0 {
+		s.bigVThreshold = bigVThreshold
 	}
 }
 
@@ -179,15 +199,18 @@ func (s *FollowService) Follow(ctx context.Context, followerID, followeeID uint6
 		return errno.ErrUserNotFound
 	}
 
-	changed, err := s.follows.Follow(ctx, followerID, followeeID, s.cfg.MaxFollowing, s.now())
+	res, err := s.follows.Follow(ctx, followerID, followeeID, s.cfg.MaxFollowing, s.bigVThreshold, s.now())
 	if err != nil {
 		if errors.Is(err, repository.ErrFollowLimitExceeded) {
 			return errno.ErrFollowLimitExceeded
 		}
 		return err
 	}
-	if changed {
+	if res.Changed {
 		s.invalidateAfterCommit(ctx, followerID, followeeID)
+		if s.changeHook != nil {
+			s.changeHook.OnFollowChanged(ctx, followerID, followeeID, res.FolloweeIsBigV, res.PromotedBigV)
+		}
 	}
 	return nil
 }
@@ -212,12 +235,15 @@ func (s *FollowService) Unfollow(ctx context.Context, followerID, followeeID uin
 		return errno.ErrUserNotFound
 	}
 
-	changed, err := s.follows.Unfollow(ctx, followerID, followeeID, s.now())
+	res, err := s.follows.Unfollow(ctx, followerID, followeeID, s.now())
 	if err != nil {
 		return err
 	}
-	if changed {
+	if res.Changed {
 		s.invalidateAfterCommit(ctx, followerID, followeeID)
+		if s.changeHook != nil {
+			s.changeHook.OnFollowChanged(ctx, followerID, followeeID, res.FolloweeIsBigV, false)
+		}
 	}
 	return nil
 }

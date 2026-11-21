@@ -19,41 +19,49 @@ type FollowRepo struct {
 
 func NewFollowRepo(db *gorm.DB) *FollowRepo { return &FollowRepo{db: db} }
 
-// Follow 在事务内幂等建立关注关系并维护双方计数。
+// Follow 在事务内幂等建立关注关系、维护双方计数，并在被关注方粉丝数达到阈值时原子晋升 is_bigv（只升不自动降）。
 //
 // 防死锁铁律：
 //  1. 事务外按升序单行 autocommit 初始化缺失的 user_follow_stats 行，避免事务内 INSERT IGNORE 残留 S 锁再升级 X 锁引发死锁；
 //  2. 事务内严格按 user_id 升序 FOR UPDATE 锁定双方 user_follow_stats（精准 Record X-Lock，无 Gap Lock）；
 //  3. 再写入 user_follows 并更新双方计数，确保与双向互关、并发取关共享同一加锁全序。
-func (r *FollowRepo) Follow(ctx context.Context, followerID, followeeID uint64, maxFollowing int, now time.Time) (bool, error) {
+func (r *FollowRepo) Follow(ctx context.Context, followerID, followeeID uint64, maxFollowing, bigVThreshold int, now time.Time) (model.FollowMutationResult, error) {
 	if followerID == 0 || followeeID == 0 || followerID == followeeID {
-		return false, fmt.Errorf("invalid follow pair (%d, %d)", followerID, followeeID)
+		return model.FollowMutationResult{}, fmt.Errorf("invalid follow pair (%d, %d)", followerID, followeeID)
 	}
 	minID, maxID := orderedPair(followerID, followeeID)
 	if err := r.ensureStatsRows(ctx, minID, maxID, now); err != nil {
-		return false, err
+		return model.FollowMutationResult{}, err
 	}
 
-	var changed bool
+	var result model.FollowMutationResult
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var statsRows []model.UserFollowStats
 		if err := tx.Raw(
-			"SELECT user_id, following_count, follower_count FROM user_follow_stats WHERE user_id IN (?, ?) ORDER BY user_id ASC FOR UPDATE",
+			"SELECT user_id, following_count, follower_count, is_bigv FROM user_follow_stats WHERE user_id IN (?, ?) ORDER BY user_id ASC FOR UPDATE",
 			minID, maxID,
 		).Scan(&statsRows).Error; err != nil {
 			return fmt.Errorf("lock follow stats (%d, %d): %w", minID, maxID, err)
 		}
 
-		var followerStats *model.UserFollowStats
+		var followerStats, followeeStats *model.UserFollowStats
 		for i := range statsRows {
-			if statsRows[i].UserID == followerID {
+			switch statsRows[i].UserID {
+			case followerID:
 				followerStats = &statsRows[i]
-				break
+			case followeeID:
+				followeeStats = &statsRows[i]
 			}
 		}
 		if followerStats == nil {
 			return fmt.Errorf("follow stats row missing for user %d", followerID)
 		}
+		if followeeStats == nil {
+			return fmt.Errorf("follow stats row missing for user %d", followeeID)
+		}
+
+		wasBigV := followeeStats.IsBigV != 0
+		result.FolloweeIsBigV = wasBigV
 
 		if maxFollowing <= 0 || uint64(followerStats.FollowingCount) >= uint64(maxFollowing) {
 			exists, err := existsInDB(tx, followerID, followeeID)
@@ -83,47 +91,71 @@ func (r *FollowRepo) Follow(ctx context.Context, followerID, followeeID uint64, 
 		).Error; err != nil {
 			return fmt.Errorf("increment following_count for %d: %w", followerID, err)
 		}
-		if err := tx.Exec(
-			"UPDATE user_follow_stats SET follower_count = follower_count + 1, updated_at = ? WHERE user_id = ?",
-			now, followeeID,
-		).Error; err != nil {
-			return fmt.Errorf("increment follower_count for %d: %w", followeeID, err)
+
+		if bigVThreshold > 0 {
+			if err := tx.Exec(
+				"UPDATE user_follow_stats SET follower_count = follower_count + 1, is_bigv = IF(follower_count + 1 >= ?, 1, is_bigv), updated_at = ? WHERE user_id = ?",
+				bigVThreshold, now, followeeID,
+			).Error; err != nil {
+				return fmt.Errorf("increment follower_count for %d: %w", followeeID, err)
+			}
+		} else {
+			if err := tx.Exec(
+				"UPDATE user_follow_stats SET follower_count = follower_count + 1, updated_at = ? WHERE user_id = ?",
+				now, followeeID,
+			).Error; err != nil {
+				return fmt.Errorf("increment follower_count for %d: %w", followeeID, err)
+			}
 		}
 
-		changed = true
+		nowBigV := wasBigV || (bigVThreshold > 0 && uint64(followeeStats.FollowerCount)+1 >= uint64(bigVThreshold))
+		result = model.FollowMutationResult{
+			Changed:        true,
+			FolloweeIsBigV: nowBigV,
+			PromotedBigV:   !wasBigV && nowBigV,
+		}
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return model.FollowMutationResult{}, err
 	}
-	return changed, nil
+	return result, nil
 }
 
-// Unfollow 在事务内幂等解除关注关系并维护双方计数。
+// Unfollow 在事务内幂等解除关注关系并维护双方计数（不回退 is_bigv，遵循只升不自动降原则）。
 // 事务外先走唯一索引短路未关注请求；事务内严格遵循与 Follow 相同的升序 FOR UPDATE 加锁顺序。
-func (r *FollowRepo) Unfollow(ctx context.Context, followerID, followeeID uint64, now time.Time) (bool, error) {
+func (r *FollowRepo) Unfollow(ctx context.Context, followerID, followeeID uint64, now time.Time) (model.FollowMutationResult, error) {
 	if followerID == 0 || followeeID == 0 || followerID == followeeID {
-		return false, nil
+		return model.FollowMutationResult{}, nil
 	}
 
 	exists, err := r.Exists(ctx, followerID, followeeID)
 	if err != nil {
-		return false, err
+		return model.FollowMutationResult{}, err
 	}
 	if !exists {
-		return false, nil
+		return model.FollowMutationResult{}, nil
 	}
 
 	minID, maxID := orderedPair(followerID, followeeID)
-	var changed bool
+	var result model.FollowMutationResult
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var statsRows []model.UserFollowStats
 		if err := tx.Raw(
-			"SELECT user_id, following_count, follower_count FROM user_follow_stats WHERE user_id IN (?, ?) ORDER BY user_id ASC FOR UPDATE",
+			"SELECT user_id, following_count, follower_count, is_bigv FROM user_follow_stats WHERE user_id IN (?, ?) ORDER BY user_id ASC FOR UPDATE",
 			minID, maxID,
 		).Scan(&statsRows).Error; err != nil {
 			return fmt.Errorf("lock follow stats (%d, %d): %w", minID, maxID, err)
 		}
+
+		var followeeIsBigV bool
+		for i := range statsRows {
+			if statsRows[i].UserID == followeeID {
+				followeeIsBigV = statsRows[i].IsBigV != 0
+				break
+			}
+		}
+		result.FolloweeIsBigV = followeeIsBigV
 
 		res := tx.Exec(
 			"DELETE FROM user_follows WHERE follower_id = ? AND followee_id = ?",
@@ -150,13 +182,13 @@ func (r *FollowRepo) Unfollow(ctx context.Context, followerID, followeeID uint64
 			return fmt.Errorf("decrement follower_count for %d: %w", followeeID, err)
 		}
 
-		changed = true
+		result.Changed = true
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return model.FollowMutationResult{}, err
 	}
-	return changed, nil
+	return result, nil
 }
 
 // Exists 检查 followerID 是否已关注 followeeID（命中 uk_follower_followee）。
@@ -186,7 +218,7 @@ func (r *FollowRepo) BatchIsFollowing(ctx context.Context, followerID uint64, fo
 	return out, nil
 }
 
-// GetStatsByUserIDs 批量读取用户关注计数；无行的用户不放入返回 map，交由三级缓存写入空值标记。
+// GetStatsByUserIDs 批量读取用户关注计数与大 V 标识；无行的用户不放入返回 map，交由三级缓存写入空值标记。
 func (r *FollowRepo) GetStatsByUserIDs(ctx context.Context, userIDs []uint64) (map[uint64]model.FollowStats, error) {
 	out := make(map[uint64]model.FollowStats, len(userIDs))
 	if len(userIDs) == 0 {
@@ -194,7 +226,7 @@ func (r *FollowRepo) GetStatsByUserIDs(ctx context.Context, userIDs []uint64) (m
 	}
 	var rows []model.UserFollowStats
 	if err := r.db.WithContext(ctx).
-		Select("user_id", "following_count", "follower_count").
+		Select("user_id", "following_count", "follower_count", "is_bigv").
 		Where("user_id IN ?", userIDs).
 		Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("get follow stats by user ids: %w", err)
@@ -203,12 +235,13 @@ func (r *FollowRepo) GetStatsByUserIDs(ctx context.Context, userIDs []uint64) (m
 		out[row.UserID] = model.FollowStats{
 			FollowingCount: int64(row.FollowingCount),
 			FollowerCount:  int64(row.FollowerCount),
+			IsBigV:         row.IsBigV != 0,
 		}
 	}
 	return out, nil
 }
 
-// GetStats 直接从 MySQL 读取单用户关注计数（无行时返回零值；预留给模块 04 Worker 等无 L1 缓存场景）。
+// GetStats 直接从 MySQL 读取单用户关注计数与大 V 标识（无行时返回零值；供模块 04 Worker 实时判定扇出策略）。
 func (r *FollowRepo) GetStats(ctx context.Context, userID uint64) (model.FollowStats, error) {
 	if userID == 0 {
 		return model.FollowStats{}, nil
@@ -218,6 +251,18 @@ func (r *FollowRepo) GetStats(ctx context.Context, userID uint64) (model.FollowS
 		return model.FollowStats{}, err
 	}
 	return m[userID], nil
+}
+
+// ListBigVIDs 拉取全站所有大 V（is_bigv = 1）用户 ID（命中 idx_bigv 覆盖索引）。
+func (r *FollowRepo) ListBigVIDs(ctx context.Context) ([]uint64, error) {
+	var ids []uint64
+	if err := r.db.WithContext(ctx).
+		Model(&model.UserFollowStats{}).
+		Where("is_bigv = 1").
+		Pluck("user_id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("list bigv user ids: %w", err)
+	}
+	return ids, nil
 }
 
 // ListFollowingBefore 按关系主键 id 倒序扫描目标用户的关注列表（命中 idx_follower_list 覆盖索引，零回表）。
