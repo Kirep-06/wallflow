@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kirep-06/gocache"
 	"github.com/gin-gonic/gin"
-	gocache "github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -87,15 +87,10 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("init jwt manager: %w", err)
 	}
 
-	l1 := gocache.New(cfg.Cache.UserProfileL1TTL, cfg.Cache.L1CleanupInterval)
-	profileCache := cache.NewMultiLevel[model.UserProfileCache](l1, rdb, cache.Options{
-		L1TTL:         cfg.Cache.UserProfileL1TTL,
-		L2TTL:         cfg.Cache.UserProfileL2TTL,
-		NullL2TTL:     cfg.Cache.UserProfileNullTTL,
-		JitterRatio:   cfg.Cache.JitterRatio,
-		DisableJitter: cfg.Cache.JitterRatio == 0,
-		Logger:        logger,
-	})
+	l1 := gocache.NewCache(cfg.Cache.L1SizeMB * 1024 * 1024)
+	profileCache := cache.NewMultiLevel[model.UserProfileCache](
+		l1, rdb, cfg.Cache.UserProfileL1TTL, cfg.Cache.UserProfileL2TTL,
+	)
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)

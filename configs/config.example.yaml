@@ -38,11 +38,9 @@ auth:
   bcrypt_cost: 10
 
 cache:
-  l1_cleanup_interval: "1m"
+  l1_size_mb: 64             # L1 gocache 环形缓冲区容量（MB）
   user_profile_l1_ttl: "30s"
   user_profile_l2_ttl: "1800s"
-  user_profile_null_ttl: "60s"
-  jitter_ratio: 0.1
 
 storage:
   cdn_domain: ""             # 例如 https://wp.kirep.top；留空时头像 URL 返回 ""

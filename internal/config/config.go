@@ -71,11 +71,9 @@ type AuthConfig struct {
 }
 
 type CacheConfig struct {
-	L1CleanupInterval  time.Duration `mapstructure:"l1_cleanup_interval"`
-	UserProfileL1TTL   time.Duration `mapstructure:"user_profile_l1_ttl"`
-	UserProfileL2TTL   time.Duration `mapstructure:"user_profile_l2_ttl"`
-	UserProfileNullTTL time.Duration `mapstructure:"user_profile_null_ttl"`
-	JitterRatio        float64       `mapstructure:"jitter_ratio"`
+	L1SizeMB         int           `mapstructure:"l1_size_mb"`
+	UserProfileL1TTL time.Duration `mapstructure:"user_profile_l1_ttl"`
+	UserProfileL2TTL time.Duration `mapstructure:"user_profile_l2_ttl"`
 }
 
 type StorageConfig struct {
@@ -178,11 +176,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.refresh_ttl", 604800*time.Second)
 	v.SetDefault("auth.bcrypt_cost", 10)
 
-	v.SetDefault("cache.l1_cleanup_interval", time.Minute)
+	v.SetDefault("cache.l1_size_mb", 64)
 	v.SetDefault("cache.user_profile_l1_ttl", 30*time.Second)
 	v.SetDefault("cache.user_profile_l2_ttl", 1800*time.Second)
-	v.SetDefault("cache.user_profile_null_ttl", 60*time.Second)
-	v.SetDefault("cache.jitter_ratio", 0.1)
 
 	v.SetDefault("storage.cdn_domain", "")
 	v.SetDefault("user.default_avatar_key", "avatars/default.png")
@@ -214,8 +210,8 @@ func (c *Config) Validate() error {
 	if c.Auth.BcryptCost < 4 || c.Auth.BcryptCost > 31 {
 		return errors.New("config: auth.bcrypt_cost must be between 4 and 31")
 	}
-	if c.Cache.JitterRatio < 0 || c.Cache.JitterRatio > 0.5 {
-		return errors.New("config: cache.jitter_ratio must be between 0 and 0.5")
+	if c.Cache.L1SizeMB < 1 {
+		return errors.New("config: cache.l1_size_mb must be at least 1")
 	}
 	return nil
 }

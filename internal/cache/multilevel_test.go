@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kirep-06/gocache"
 	"github.com/alicebob/miniredis/v2"
-	gocache "github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,13 +24,8 @@ func newTestCache(t *testing.T) (*miniredis.Miniredis, *gocache.Cache, *MultiLev
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	l1 := gocache.New(30*time.Second, time.Minute)
-	c := NewMultiLevel[testItem](l1, rdb, Options{
-		L1TTL:       30 * time.Second,
-		L2TTL:       1800 * time.Second,
-		NullL2TTL:   60 * time.Second,
-		JitterRatio: 0.1,
-	})
+	l1 := gocache.NewCache(2 * 1024 * 1024)
+	c := NewMultiLevel[testItem](l1, rdb, 30*time.Second, 1800*time.Second)
 	return mr, l1, c
 }
 
@@ -63,7 +58,7 @@ func TestMultiLevel_HitPathAndDelete(t *testing.T) {
 		t.Fatalf("L1 hit failed: got=%+v err=%v calls=%d", got, err, calls.Load())
 	}
 	_ = mr.Set(key, rawL2)
-	l1.Flush()
+	l1.Clear()
 	if got, err := c.Get(ctx, key, loader); err != nil || got != v1 || calls.Load() != 1 {
 		t.Fatalf("L2 hit failed: got=%+v err=%v calls=%d", got, err, calls.Load())
 	}
@@ -102,7 +97,7 @@ func TestMultiLevel_NullCache(t *testing.T) {
 	if _, err := c.Get(ctx, key, loader); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected L1 ErrNotFound, got %v", err)
 	}
-	l1.Flush()
+	l1.Clear()
 	if _, err := c.Get(ctx, key, loader); !errors.Is(err, ErrNotFound) || calls.Load() != 1 {
 		t.Fatalf("expected L2 ErrNotFound without reload: err=%v calls=%d", err, calls.Load())
 	}

@@ -53,11 +53,11 @@ type AuthSessionRepository interface {
 }
 
 type authSessionRepository struct {
-	rdb redis.Cmdable
+	rdb *redis.Client
 }
 
 // NewAuthSessionRepository 构造基于 Redis 的会话仓储实例。
-func NewAuthSessionRepository(rdb redis.Cmdable) AuthSessionRepository {
+func NewAuthSessionRepository(rdb *redis.Client) AuthSessionRepository {
 	return &authSessionRepository{rdb: rdb}
 }
 

@@ -3,12 +3,12 @@ module wallpaper-feed
 go 1.24.0
 
 require (
+	github.com/Kirep-06/gocache v0.0.0-20261118071930-b144dc112534
 	github.com/alicebob/miniredis/v2 v2.34.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-sql-driver/mysql v1.9.2
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/joho/godotenv v1.5.1
-	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.37.0
