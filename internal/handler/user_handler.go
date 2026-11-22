@@ -1,19 +1,13 @@
 package handler
 
 import (
-	"regexp"
-	"strconv"
-
 	"github.com/gin-gonic/gin"
 
 	"wallpaper-feed/internal/middleware"
 	"wallpaper-feed/internal/model"
-	"wallpaper-feed/internal/pkg/errno"
 	"wallpaper-feed/internal/pkg/response"
 	"wallpaper-feed/internal/service"
 )
-
-var positiveIntIDPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 // UserHandler 处理 M1 用户资料与创作者主页 HTTP 接口。
 type UserHandler struct {
@@ -55,7 +49,7 @@ func (h *UserHandler) PatchMe(c *gin.Context) {
 
 // GetPublicProfile 处理 GET /api/v1/users/:id。
 func (h *UserHandler) GetPublicProfile(c *gin.Context) {
-	targetID, err := parsePositiveUint64(c.Param("id"))
+	targetID, err := parsePositiveUint64(c.Param("id"), "用户 ID 格式不合法")
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -68,15 +62,4 @@ func (h *UserHandler) GetPublicProfile(c *gin.Context) {
 		return
 	}
 	response.OK(c, profile)
-}
-
-func parsePositiveUint64(raw string) (uint64, error) {
-	if !positiveIntIDPattern.MatchString(raw) {
-		return 0, errno.ErrInvalidParam.WithMessage("用户 ID 格式不合法")
-	}
-	id, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || id == 0 {
-		return 0, errno.ErrInvalidParam.WithMessage("用户 ID 格式不合法")
-	}
-	return id, nil
 }
