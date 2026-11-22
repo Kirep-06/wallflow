@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	startupPingTimeout   = 5 * time.Second
 	mysqlDefaultMaxOpen  = 50
 	mysqlDefaultMaxIdle  = 10
 	mysqlConnMaxLifetime = 30 * time.Minute
