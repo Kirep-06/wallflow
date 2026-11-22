@@ -338,10 +338,5 @@ func validateRegisterNickname(raw, fallbackUsername string) (string, error) {
 	if raw == "" {
 		return fallbackUsername, nil
 	}
-	nick := strings.TrimSpace(raw)
-	n := utf8.RuneCountInString(nick)
-	if n < 1 || n > maxNicknameRunes {
-		return "", errno.ErrInvalidParam.WithMessage("昵称长度需为 1~32 个字符")
-	}
-	return nick, nil
+	return validateNickname(raw)
 }

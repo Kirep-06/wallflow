@@ -18,7 +18,6 @@ import (
 const (
 	userProfileKeyPrefix = "user:profile:"
 	defaultAvatarKey     = "avatars/default.png"
-	maxNicknameRunes     = 32
 	maxBioRunes          = 200
 	maxAvatarKeyLen      = 255
 )
@@ -125,7 +124,7 @@ func (s *UserService) InvalidateProfileCache(ctx context.Context, userID uint64)
 // ToUserProfile 将缓存资料结构转换为对外 HTTP DTO（所有 ID 序列化为 string）。
 func (s *UserService) ToUserProfile(p model.UserProfileCache) model.UserProfile {
 	return model.UserProfile{
-		ID:             strconv.FormatUint(p.ID, 10),
+		ID:             p.ID,
 		Username:       p.Username,
 		Nickname:       p.Nickname,
 		AvatarURL:      s.BuildAvatarURL(p.AvatarKey),
@@ -183,10 +182,9 @@ func validatePatchProfile(userID uint64, req model.PatchProfileRequest) (map[str
 		if req.Nickname.Null {
 			return nil, errno.ErrInvalidParam.WithMessage("nickname 不能为 null")
 		}
-		nick := strings.TrimSpace(req.Nickname.Value)
-		n := utf8.RuneCountInString(nick)
-		if n < 1 || n > maxNicknameRunes {
-			return nil, errno.ErrInvalidParam.WithMessage("昵称长度需为 1~32 个字符")
+		nick, err := validateNickname(req.Nickname.Value)
+		if err != nil {
+			return nil, err
 		}
 		updates["nickname"] = nick
 	}

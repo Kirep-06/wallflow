@@ -1,10 +1,6 @@
 package model
 
-import (
-	"bytes"
-	"encoding/json"
-	"time"
-)
+import "time"
 
 const (
 	UserStatusActive int8 = 1
@@ -75,23 +71,6 @@ func (r *UserAuthRecord) ToProfileCache() UserProfileCache {
 	}
 }
 
-// PatchString 用于 PATCH 请求中精确区分“未传字段”、“显式传 null”与“正常字符串值”。
-type PatchString struct {
-	Set   bool
-	Null  bool
-	Value string
-}
-
-// UnmarshalJSON 解析 JSON 字符串字段，显式标记 null。
-func (p *PatchString) UnmarshalJSON(data []byte) error {
-	p.Set = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		p.Null = true
-		return nil
-	}
-	return json.Unmarshal(data, &p.Value)
-}
-
 // RegisterRequest 为账号注册请求体。
 type RegisterRequest struct {
 	Username string `json:"username"`
@@ -127,7 +106,7 @@ type TokenPair struct {
 
 // UserProfile 为个人资料响应结构（id 一律序列化为 string）。
 type UserProfile struct {
-	ID             string    `json:"id"`
+	ID             uint64    `json:"id,string"`
 	Username       string    `json:"username"`
 	Nickname       string    `json:"nickname"`
 	AvatarURL      string    `json:"avatar_url"`
