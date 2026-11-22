@@ -42,7 +42,7 @@ func (r *UserRepository) FindAuthByUsername(ctx context.Context, username string
 	var rec model.UserAuthRecord
 	err := r.db.WithContext(ctx).
 		Table(model.User{}.TableName()).
-		Select("id, username, password_hash, nickname, avatar_key, bio, status, created_at").
+		Select("id, username, password_hash, nickname, avatar_key, bio, created_at").
 		Where("username = ?", username).
 		Take(&rec).Error
 	if err != nil {
@@ -70,22 +70,22 @@ func (r *UserRepository) FindProfileByID(ctx context.Context, id uint64) (*model
 	return &profile, nil
 }
 
-func (r *UserRepository) GetStatusByID(ctx context.Context, id uint64) (int8, error) {
+func (r *UserRepository) ExistsByID(ctx context.Context, id uint64) (bool, error) {
 	var row struct {
-		Status int8
+		ID uint64
 	}
 	err := r.db.WithContext(ctx).
 		Table(model.User{}.TableName()).
-		Select("status").
+		Select("id").
 		Where("id = ?", id).
 		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, ErrUserNotFound
+			return false, nil
 		}
-		return 0, fmt.Errorf("user repo get status by id: %w", err)
+		return false, fmt.Errorf("user repo exists by id: %w", err)
 	}
-	return row.Status, nil
+	return true, nil
 }
 
 func (r *UserRepository) UpdateProfileFields(ctx context.Context, id uint64, fields map[string]any) error {

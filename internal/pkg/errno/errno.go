@@ -24,7 +24,6 @@ var (
 	ErrUnauthorized    = &Error{Code: 10003, HTTPStatus: http.StatusUnauthorized, Msg: "未登录或登录已过期"}
 	ErrForbidden       = &Error{Code: 10004, HTTPStatus: http.StatusForbidden, Msg: "无权执行该操作"}
 	ErrNotFound        = &Error{Code: 10005, HTTPStatus: http.StatusNotFound, Msg: "资源不存在"}
-	ErrAccountBanned   = &Error{Code: 10006, HTTPStatus: http.StatusForbidden, Msg: "账号已被封禁"}
 	ErrTooManyRequests = &Error{Code: 10007, HTTPStatus: http.StatusTooManyRequests, Msg: "请求过于频繁"}
 )
 

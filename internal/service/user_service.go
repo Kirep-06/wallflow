@@ -44,12 +44,8 @@ func NewUserService(
 	}
 }
 
-// GetMe 获取当前登录用户完整资料，并实时校验账号封禁状态。
+// GetMe 获取当前登录用户完整资料。
 func (s *UserService) GetMe(ctx context.Context, userID uint64) (*model.UserProfile, error) {
-	if err := s.ensureUserActive(ctx, userID); err != nil {
-		return nil, err
-	}
-
 	cached, err := s.getCachedProfile(ctx, userID)
 	if err != nil {
 		if errors.Is(err, cache.ErrNotFound) {
@@ -62,14 +58,10 @@ func (s *UserService) GetMe(ctx context.Context, userID uint64) (*model.UserProf
 	return &profile, nil
 }
 
-// PatchMe 执行字段级资料更新：校验参数 -> 检查账号状态 -> 写 MySQL -> 先删 L1 再删 L2 -> 主键回读 MySQL。
+// PatchMe 执行字段级资料更新：校验参数 -> 写 MySQL -> 先删 L1 再删 L2 -> 主键回读 MySQL。
 func (s *UserService) PatchMe(ctx context.Context, userID uint64, req model.PatchProfileRequest) (*model.UserProfile, error) {
 	updates, err := validatePatchProfile(userID, req)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := s.ensureUserActive(ctx, userID); err != nil {
 		return nil, err
 	}
 
@@ -159,20 +151,6 @@ func (s *UserService) getCachedProfile(ctx context.Context, userID uint64) (mode
 		}
 		return *p, nil
 	})
-}
-
-func (s *UserService) ensureUserActive(ctx context.Context, userID uint64) error {
-	status, err := s.userRepo.GetStatusByID(ctx, userID)
-	if err != nil {
-		if errors.Is(err, repository.ErrUserNotFound) {
-			return errno.ErrUnauthorized
-		}
-		return errno.ErrInternal.Wrap(err)
-	}
-	if status != model.UserStatusActive {
-		return errno.ErrAccountBanned
-	}
-	return nil
 }
 
 func validatePatchProfile(userID uint64, req model.PatchProfileRequest) (map[string]any, error) {

@@ -91,7 +91,6 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 		Username:     username,
 		PasswordHash: passwordHash,
 		Nickname:     nickname,
-		Status:       model.UserStatusActive,
 	}
 	if err := s.userRepo.Create(ctx, user); err != nil {
 		if errors.Is(err, repository.ErrDuplicateUsername) {
@@ -138,10 +137,6 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, errno.ErrInvalidCredentials
 	}
 
-	if rec.Status != model.UserStatusActive {
-		return nil, errno.ErrAccountBanned
-	}
-
 	pair, err := s.createSessionAndTokens(ctx, rec.ID)
 	if err != nil {
 		return nil, err
@@ -178,17 +173,13 @@ func (s *AuthService) Refresh(ctx context.Context, req model.RefreshRequest) (*m
 		return nil, errno.ErrInvalidRefreshToken
 	}
 
-	status, err := s.userRepo.GetStatusByID(ctx, session.UserID)
+	exists, err := s.userRepo.ExistsByID(ctx, session.UserID)
 	if err != nil {
-		if errors.Is(err, repository.ErrUserNotFound) {
-			s.deleteSessionBestEffort(ctx, sid)
-			return nil, errno.ErrInvalidRefreshToken
-		}
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-	if status != model.UserStatusActive {
+	if !exists {
 		s.deleteSessionBestEffort(ctx, sid)
-		return nil, errno.ErrAccountBanned
+		return nil, errno.ErrInvalidRefreshToken
 	}
 
 	pair, newHash, err := s.issueTokenPair(session.UserID, sid, session.ExpiresAt)

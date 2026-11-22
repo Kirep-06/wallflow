@@ -2,11 +2,6 @@ package model
 
 import "time"
 
-const (
-	UserStatusActive int8 = 1
-	UserStatusBanned int8 = 2
-)
-
 // User 对应 MySQL users 表实体。
 type User struct {
 	ID           uint64    `gorm:"primaryKey;autoIncrement"`
@@ -15,7 +10,6 @@ type User struct {
 	Nickname     string    `gorm:"type:varchar(32);not null"`
 	AvatarKey    string    `gorm:"type:varchar(255);not null;default:''"`
 	Bio          string    `gorm:"type:varchar(200);not null;default:''"`
-	Status       int8      `gorm:"type:tinyint;not null;default:1"`
 	CreatedAt    time.Time `gorm:"autoCreateTime"`
 	UpdatedAt    time.Time `gorm:"autoUpdateTime"`
 }
@@ -33,11 +27,10 @@ type UserAuthRecord struct {
 	Nickname     string
 	AvatarKey    string
 	Bio          string
-	Status       int8
 	CreatedAt    time.Time
 }
 
-// UserProfileCache 为三级缓存用户资料实体，物理隔离 password_hash 与 status 字段。
+// UserProfileCache 为三级缓存用户资料实体，物理隔离 password_hash 字段。
 type UserProfileCache struct {
 	ID        uint64    `json:"id,string"`
 	Username  string    `json:"username"`

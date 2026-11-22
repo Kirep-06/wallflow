@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS users (
     nickname      VARCHAR(32)     NOT NULL                COMMENT '展示昵称',
     avatar_key    VARCHAR(255)    NOT NULL DEFAULT ''     COMMENT '头像对象存储相对 key，空串表示默认头像',
     bio           VARCHAR(200)    NOT NULL DEFAULT ''     COMMENT '个人简介',
-    status        TINYINT         NOT NULL DEFAULT 1      COMMENT '1-正常 2-封禁',
     created_at    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
