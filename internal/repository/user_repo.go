@@ -41,7 +41,7 @@ func (r *UserRepository) Create(ctx context.Context, user *model.User) error {
 func (r *UserRepository) FindAuthByUsername(ctx context.Context, username string) (*model.UserAuthRecord, error) {
 	var rec model.UserAuthRecord
 	err := r.db.WithContext(ctx).
-		Table("users").
+		Table(model.User{}.TableName()).
 		Select("id, username, password_hash, nickname, avatar_key, bio, status, created_at").
 		Where("username = ?", username).
 		Take(&rec).Error
@@ -75,7 +75,7 @@ func (r *UserRepository) GetStatusByID(ctx context.Context, id uint64) (int8, er
 		Status int8
 	}
 	err := r.db.WithContext(ctx).
-		Table("users").
+		Table(model.User{}.TableName()).
 		Select("status").
 		Where("id = ?", id).
 		Take(&row).Error
