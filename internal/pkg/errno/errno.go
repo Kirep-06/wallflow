@@ -35,6 +35,14 @@ var (
 	ErrInvalidRefreshToken = &Error{Code: 20004, HTTPStatus: http.StatusUnauthorized, Msg: "刷新凭证无效或已过期"}
 )
 
+// 3xxxx：壁纸与上传错误码（M2 / M3）。
+var (
+	ErrUploadVerifyFailed   = &Error{Code: 30001, HTTPStatus: http.StatusBadRequest, Msg: "上传文件不存在或校验失败"}
+	ErrWallpaperNotFound    = &Error{Code: 30002, HTTPStatus: http.StatusNotFound, Msg: "壁纸不存在"}
+	ErrInvalidCategoryOrTag = &Error{Code: 30003, HTTPStatus: http.StatusBadRequest, Msg: "分类或标签不合法"}
+	ErrDuplicateObjectKey   = &Error{Code: 30004, HTTPStatus: http.StatusConflict, Msg: "该上传文件已发布，请勿重复提交"}
+)
+
 // 5xxxx：游标与 Feed 基础错误码（供内部 cursor 工具复用）。
 var (
 	ErrInvalidCursor = &Error{Code: 50001, HTTPStatus: http.StatusBadRequest, Msg: "分页游标无效"}
