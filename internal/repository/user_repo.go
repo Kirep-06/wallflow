@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 
 	"wallpaper-feed/internal/model"
 )
-
-const mysqlErrDuplicateEntry uint16 = 1062
 
 var (
 	ErrUserNotFound      = errors.New("repository: user not found")
@@ -99,15 +96,4 @@ func (r *UserRepository) UpdateProfileFields(ctx context.Context, id uint64, fie
 		return fmt.Errorf("user repo update profile fields: %w", err)
 	}
 	return nil
-}
-
-func isDuplicateKeyError(err error) bool {
-	if errors.Is(err, gorm.ErrDuplicatedKey) {
-		return true
-	}
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlErrDuplicateEntry {
-		return true
-	}
-	return false
 }
