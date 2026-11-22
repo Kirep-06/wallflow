@@ -34,12 +34,12 @@ func TestDecode_Invalid(t *testing.T) {
 	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	invalid := []string{
 		"",
-		"eyJpZCI6MX0=",           // 带 padding
-		"!!!bad!!!",              // 非法 base64
-		b64("not-json"),          // 非 JSON
-		b64("null"),              // JSON null
-		b64(`{"id":1,"x":2}`),    // 未知字段
-		b64(`{"id":1}{"id":2}`),  // 尾随脏数据
+		"eyJpZCI6MX0=",            // 带 padding
+		"!!!bad!!!",               // 非法 base64
+		b64("not-json"),           // 非 JSON
+		b64("null"),               // JSON null
+		b64(`{"id":1,"x":2}`),     // 未知字段
+		b64(`{"id":1}{"id":2}`),   // 尾随脏数据
 		strings.Repeat("a", 1025), // 超长
 	}
 
