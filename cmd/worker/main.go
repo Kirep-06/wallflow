@@ -23,12 +23,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := app.NewLogger(cfg.App).With(slog.String("component", "worker"))
+	logger := app.NewLogger(cfg.IsDev()).With(slog.String("component", "worker"))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	logger.Info("worker placeholder started (M1 skeleton, awaiting M3/M5 jobs)",
-		slog.String("env", cfg.App.Env),
+		slog.String("env", cfg.Server.Env),
 	)
 
 	<-ctx.Done()

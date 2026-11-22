@@ -15,6 +15,14 @@ import (
 	"wallpaper-feed/internal/config"
 )
 
+const (
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 10 * time.Second
+	httpWriteTimeout      = 15 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	httpShutdownTimeout   = 10 * time.Second
+)
+
 func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (default: WF_CONFIG_FILE or configs/config.local.yaml)")
@@ -36,19 +44,19 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Server.Addr,
+		Addr:              cfg.Server.Addr(),
 		Handler:           application.Router,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-		IdleTimeout:       cfg.Server.IdleTimeout,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		application.Logger.Info("http api server starting",
-			slog.String("addr", cfg.Server.Addr),
-			slog.String("env", cfg.App.Env),
+			slog.String("addr", cfg.Server.Addr()),
+			slog.String("env", cfg.Server.Env),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -67,7 +75,7 @@ func main() {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {

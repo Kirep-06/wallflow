@@ -7,7 +7,6 @@ import (
 	stdlog "log"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/Kirep-06/gocache"
@@ -26,7 +25,25 @@ import (
 	"wallpaper-feed/internal/service"
 )
 
-const startupPingTimeout = 5 * time.Second
+const (
+	serviceName          = "wallpaper-feed"
+	startupPingTimeout   = 5 * time.Second
+	mysqlDefaultMaxOpen  = 50
+	mysqlDefaultMaxIdle  = 10
+	mysqlConnMaxLifetime = 30 * time.Minute
+	redisDialTimeout     = 3 * time.Second
+	redisReadTimeout     = 2 * time.Second
+	redisWriteTimeout    = 2 * time.Second
+
+	jwtIssuer        = "wallpaper-feed"
+	accessTokenTTL   = 2 * time.Hour
+	refreshTokenTTL  = 7 * 24 * time.Hour
+	bcryptCost       = 10
+	l1CacheSizeBytes = 64 * 1024 * 1024
+	userProfileL1TTL = 30 * time.Second
+	userProfileL2TTL = 30 * time.Minute
+	defaultAvatarKey = "avatars/default.png"
+)
 
 // App 持有后端核心依赖句柄与 HTTP 路由引擎。
 type App struct {
@@ -38,36 +55,24 @@ type App struct {
 	Router  *gin.Engine
 }
 
-// NewLogger 按运行环境与日志级别初始化全局 slog.Logger。
-func NewLogger(cfg config.AppConfig) *slog.Logger {
-	var level slog.Level
-	switch strings.ToLower(strings.TrimSpace(cfg.LogLevel)) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	opts := &slog.HandlerOptions{Level: level}
+// NewLogger 按运行环境初始化全局 slog.Logger。
+func NewLogger(isDev bool) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
 	var h slog.Handler
-	if strings.EqualFold(cfg.Env, "prod") || strings.EqualFold(cfg.Env, "production") {
-		h = slog.NewJSONHandler(os.Stdout, opts)
-	} else {
+	if isDev {
 		h = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		h = slog.NewJSONHandler(os.Stdout, opts)
 	}
 
-	logger := slog.New(h).With(slog.String("service", cfg.Name))
+	logger := slog.New(h).With(slog.String("service", serviceName))
 	slog.SetDefault(logger)
 	return logger
 }
 
 // New 装配 MySQL、Redis、L1 gocache、领域服务与 HTTP 路由。
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
-	logger := NewLogger(cfg.App)
+	logger := NewLogger(cfg.IsDev())
 
 	db, err := openMySQL(ctx, cfg)
 	if err != nil {
@@ -80,16 +85,16 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	jwtManager, err := jwtutil.NewManager(cfg.Auth.JWTSecret, cfg.Auth.Issuer, cfg.Auth.AccessTTL)
+	jwtManager, err := jwtutil.NewManager(cfg.JWTSecret, jwtIssuer, accessTokenTTL)
 	if err != nil {
 		_ = rdb.Close()
 		closeDB(db)
 		return nil, fmt.Errorf("init jwt manager: %w", err)
 	}
 
-	l1 := gocache.NewCache(cfg.Cache.L1SizeMB * 1024 * 1024)
+	l1 := gocache.NewCache(l1CacheSizeBytes)
 	profileCache := cache.NewMultiLevel[model.UserProfileCache](
-		l1, rdb, cfg.Cache.UserProfileL1TTL, cfg.Cache.UserProfileL2TTL,
+		l1, rdb, userProfileL1TTL, userProfileL2TTL,
 	)
 
 	userRepo := repository.NewUserRepository(db)
@@ -99,7 +104,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		userRepo,
 		profileCache,
 		cfg.Storage.CDNDomain,
-		cfg.User.DefaultAvatarKey,
+		defaultAvatarKey,
 		logger,
 	)
 
@@ -108,8 +113,8 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		sessionRepo,
 		userSvc,
 		jwtManager,
-		cfg.Auth.RefreshTTL,
-		cfg.Auth.BcryptCost,
+		refreshTokenTTL,
+		bcryptCost,
 		logger,
 	)
 	if err != nil {
@@ -174,7 +179,7 @@ func openMySQL(ctx context.Context, cfg *config.Config) (*gorm.DB, error) {
 		},
 	)
 
-	db, err := gorm.Open(mysql.Open(cfg.MySQL.DSN), &gorm.Config{
+	db, err := gorm.Open(mysql.Open(cfg.MySQL.DSN()), &gorm.Config{
 		TranslateError: true,
 		Logger:         dbLogger,
 	})
@@ -186,9 +191,14 @@ func openMySQL(ctx context.Context, cfg *config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get mysql sql.DB: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(cfg.MySQL.MaxOpenConns)
-	sqlDB.SetMaxIdleConns(cfg.MySQL.MaxIdleConns)
-	sqlDB.SetConnMaxLifetime(cfg.MySQL.ConnMaxLifetime)
+
+	maxOpen := cfg.MySQL.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = mysqlDefaultMaxOpen
+	}
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(min(mysqlDefaultMaxIdle, maxOpen))
+	sqlDB.SetConnMaxLifetime(mysqlConnMaxLifetime)
 
 	pingCtx, cancel := context.WithTimeout(ctx, startupPingTimeout)
 	defer cancel()
@@ -201,12 +211,12 @@ func openMySQL(ctx context.Context, cfg *config.Config) (*gorm.DB, error) {
 
 func openRedis(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:         cfg.Addr,
+		Addr:         cfg.Addr(),
 		Password:     cfg.Password,
 		DB:           cfg.DB,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		DialTimeout:  redisDialTimeout,
+		ReadTimeout:  redisReadTimeout,
+		WriteTimeout: redisWriteTimeout,
 	})
 
 	pingCtx, cancel := context.WithTimeout(ctx, startupPingTimeout)

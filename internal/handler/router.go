@@ -29,8 +29,8 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 
 	r := gin.New()
 	r.Use(middleware.Recovery(), middleware.RequestLog())
-	if deps.Config != nil && (isDev || len(deps.Config.Server.CORSAllowOrigins) > 0) {
-		r.Use(middleware.CORS(isDev, deps.Config.Server.CORSAllowOrigins))
+	if isDev {
+		r.Use(middleware.CORS(true, nil))
 	}
 
 	r.NoRoute(func(c *gin.Context) {
