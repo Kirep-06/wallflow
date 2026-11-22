@@ -26,11 +26,13 @@ type Config struct {
 	JWTSecret string        `mapstructure:"-"`
 }
 
+// ServerConfig 为 HTTP 服务运行配置。
 type ServerConfig struct {
 	Port int    `mapstructure:"port"`
 	Env  string `mapstructure:"env"`
 }
 
+// MySQLConfig 为 MySQL 连接与连接池配置。
 type MySQLConfig struct {
 	Host         string `mapstructure:"host"`
 	Port         int    `mapstructure:"port"`
@@ -40,6 +42,7 @@ type MySQLConfig struct {
 	MaxOpenConns int    `mapstructure:"max_open_conns"`
 }
 
+// RedisConfig 为 Redis 连接配置。
 type RedisConfig struct {
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
@@ -47,6 +50,7 @@ type RedisConfig struct {
 	DB       int    `mapstructure:"db"`
 }
 
+// StorageConfig 为对象存储与 CDN 域名配置。
 type StorageConfig struct {
 	CDNDomain string `mapstructure:"cdn_domain"`
 }
@@ -75,13 +79,16 @@ func Load(path string) (*Config, error) {
 }
 
 // IsDev 判断当前是否为开发运行环境。
-func (c *Config) IsDev() bool {
+func (c Config) IsDev() bool {
 	return c.Server.Env == "" || strings.EqualFold(c.Server.Env, "dev") || strings.EqualFold(c.Server.Env, "development")
 }
+
+// Addr 组装 Redis 连接地址。
 func (r RedisConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", r.Host, r.Port)
 }
 
+// Addr 组装 HTTP 服务监听地址。
 func (s ServerConfig) Addr() string {
 	return fmt.Sprintf(":%d", s.Port)
 }
