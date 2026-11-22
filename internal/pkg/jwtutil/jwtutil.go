@@ -35,9 +35,6 @@ var (
 type AccessClaims struct {
 	UserID    uint64
 	SessionID string
-	TokenID   string
-	Issuer    string
-	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
 
@@ -176,9 +173,6 @@ func (m *Manager) ParseAccessToken(tokenStr string) (*AccessClaims, error) {
 	return &AccessClaims{
 		UserID:    uid,
 		SessionID: claims.SID,
-		TokenID:   claims.ID,
-		Issuer:    claims.Issuer,
-		IssuedAt:  claims.IssuedAt.Time.UTC(),
 		ExpiresAt: claims.ExpiresAt.Time.UTC(),
 	}, nil
 }

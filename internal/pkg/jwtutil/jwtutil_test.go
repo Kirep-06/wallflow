@@ -34,7 +34,7 @@ func TestAccessToken(t *testing.T) {
 		t.Fatalf("GenerateAccessToken failed: expIn=%d err=%v", expIn, err)
 	}
 	claims, err := mgr.ParseAccessToken(tok)
-	if err != nil || claims.UserID != 10001 || claims.SessionID != sid || claims.Issuer != "wallpaper-feed" || claims.TokenID == "" {
+	if err != nil || claims.UserID != 10001 || claims.SessionID != sid || !claims.ExpiresAt.Equal(now.Add(2*time.Hour)) {
 		t.Fatalf("unexpected claims: %+v err=%v", claims, err)
 	}
 
