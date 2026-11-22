@@ -26,7 +26,7 @@ var avatarKeySuffixPattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
 // UserService 负责用户资料三级缓存读取、字段级更新与创作者公开主页组装。
 type UserService struct {
-	userRepo         repository.UserRepository
+	userRepo         *repository.UserRepository
 	profileCache     *cache.MultiLevel[model.UserProfileCache]
 	cdnDomain        string
 	defaultAvatarKey string
@@ -35,7 +35,7 @@ type UserService struct {
 
 // NewUserService 构造用户领域服务。
 func NewUserService(
-	userRepo repository.UserRepository,
+	userRepo *repository.UserRepository,
 	profileCache *cache.MultiLevel[model.UserProfileCache],
 	cdnDomain string,
 	defaultAvatarKey string,
@@ -89,7 +89,7 @@ func (s *UserService) PatchMe(ctx context.Context, userID uint64, req model.Patc
 	// 写后失效：先删 L1 再删 L2；Redis 异常记告警不阻断已提交的写请求。
 	s.InvalidateProfileCache(ctx, userID)
 
-	fresh, err := s.userRepo.FindByID(ctx, userID)
+	fresh, err := s.userRepo.FindProfileByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
 			return nil, errno.ErrUnauthorized
@@ -97,7 +97,7 @@ func (s *UserService) PatchMe(ctx context.Context, userID uint64, req model.Patc
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	profile := s.ToUserProfile(fresh.ToProfileCache())
+	profile := s.ToUserProfile(*fresh)
 	return &profile, nil
 }
 

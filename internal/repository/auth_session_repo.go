@@ -43,29 +43,21 @@ type AuthSession struct {
 	ExpiresAt     time.Time
 }
 
-// AuthSessionRepository 定义 Redis 登录会话仓储接口（无 L1 缓存）。
-type AuthSessionRepository interface {
-	Create(ctx context.Context, session AuthSession) error
-	GetAuthCheck(ctx context.Context, sid string) (userID uint64, expiresAt time.Time, err error)
-	Get(ctx context.Context, sid string) (*AuthSession, error)
-	UpdateRefreshHash(ctx context.Context, sid, oldHash, newHash string) error
-	Delete(ctx context.Context, sid string) error
-}
-
-type authSessionRepository struct {
+// AuthSessionRepository 封装基于 Redis 的登录会话数据访问（无 L1 缓存）。
+type AuthSessionRepository struct {
 	rdb *redis.Client
 }
 
 // NewAuthSessionRepository 构造基于 Redis 的会话仓储实例。
-func NewAuthSessionRepository(rdb *redis.Client) AuthSessionRepository {
-	return &authSessionRepository{rdb: rdb}
+func NewAuthSessionRepository(rdb *redis.Client) *AuthSessionRepository {
+	return &AuthSessionRepository{rdb: rdb}
 }
 
 func authSessionKey(sid string) string {
 	return authSessionKeyPrefix + sid
 }
 
-func (r *authSessionRepository) Create(ctx context.Context, session AuthSession) error {
+func (r *AuthSessionRepository) Create(ctx context.Context, session AuthSession) error {
 	key := authSessionKey(session.SessionID)
 	expUnix := session.ExpiresAt.UTC().Unix()
 
@@ -82,34 +74,7 @@ func (r *authSessionRepository) Create(ctx context.Context, session AuthSession)
 	return nil
 }
 
-func (r *authSessionRepository) GetAuthCheck(ctx context.Context, sid string) (uint64, time.Time, error) {
-	vals, err := r.rdb.HMGet(ctx, authSessionKey(sid), fieldUserID, fieldExpiresAt).Result()
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("auth session repo hmget check: %w", err)
-	}
-	if len(vals) != 2 || vals[0] == nil || vals[1] == nil {
-		return 0, time.Time{}, ErrSessionNotFound
-	}
-
-	uidStr, ok1 := vals[0].(string)
-	expStr, ok2 := vals[1].(string)
-	if !ok1 || !ok2 {
-		return 0, time.Time{}, ErrSessionNotFound
-	}
-
-	uid, err := strconv.ParseUint(uidStr, 10, 64)
-	if err != nil || uid == 0 {
-		return 0, time.Time{}, ErrSessionNotFound
-	}
-	expUnix, err := strconv.ParseInt(expStr, 10, 64)
-	if err != nil || expUnix <= 0 {
-		return 0, time.Time{}, ErrSessionNotFound
-	}
-
-	return uid, time.Unix(expUnix, 0).UTC(), nil
-}
-
-func (r *authSessionRepository) Get(ctx context.Context, sid string) (*AuthSession, error) {
+func (r *AuthSessionRepository) Get(ctx context.Context, sid string) (*AuthSession, error) {
 	vals, err := r.rdb.HMGet(ctx, authSessionKey(sid), fieldUserID, fieldRefreshSHA256, fieldExpiresAt).Result()
 	if err != nil {
 		return nil, fmt.Errorf("auth session repo hmget: %w", err)
@@ -142,7 +107,7 @@ func (r *authSessionRepository) Get(ctx context.Context, sid string) (*AuthSessi
 	}, nil
 }
 
-func (r *authSessionRepository) UpdateRefreshHash(ctx context.Context, sid, oldHash, newHash string) error {
+func (r *AuthSessionRepository) UpdateRefreshHash(ctx context.Context, sid, oldHash, newHash string) error {
 	res, err := updateRefreshHashScript.Run(ctx, r.rdb, []string{authSessionKey(sid)}, oldHash, newHash).Int()
 	if err != nil {
 		return fmt.Errorf("auth session repo update refresh hash: %w", err)
@@ -157,7 +122,7 @@ func (r *authSessionRepository) UpdateRefreshHash(ctx context.Context, sid, oldH
 	}
 }
 
-func (r *authSessionRepository) Delete(ctx context.Context, sid string) error {
+func (r *AuthSessionRepository) Delete(ctx context.Context, sid string) error {
 	if err := r.rdb.Del(ctx, authSessionKey(sid)).Err(); err != nil {
 		return fmt.Errorf("auth session repo delete: %w", err)
 	}

@@ -34,8 +34,8 @@ type AuthenticatedUser struct {
 
 // AuthService 负责注册、登录、刷新令牌、登出与请求鉴权逻辑。
 type AuthService struct {
-	userRepo    repository.UserRepository
-	sessionRepo repository.AuthSessionRepository
+	userRepo    *repository.UserRepository
+	sessionRepo *repository.AuthSessionRepository
 	userSvc     *UserService
 	jwtManager  *jwtutil.Manager
 	refreshTTL  time.Duration
@@ -47,8 +47,8 @@ type AuthService struct {
 
 // NewAuthService 构造认证领域服务，并预生成同成本 dummyHash 用于防用户名枚举。
 func NewAuthService(
-	userRepo repository.UserRepository,
-	sessionRepo repository.AuthSessionRepository,
+	userRepo *repository.UserRepository,
+	sessionRepo *repository.AuthSessionRepository,
 	userSvc *UserService,
 	jwtManager *jwtutil.Manager,
 	refreshTTL time.Duration,
@@ -248,7 +248,7 @@ func (s *AuthService) Authenticate(ctx context.Context, accessToken string) (*Au
 		return nil, errno.ErrUnauthorized
 	}
 
-	uid, expiresAt, err := s.sessionRepo.GetAuthCheck(ctx, claims.SessionID)
+	session, err := s.sessionRepo.Get(ctx, claims.SessionID)
 	if err != nil {
 		if errors.Is(err, repository.ErrSessionNotFound) {
 			return nil, errno.ErrUnauthorized
@@ -257,7 +257,7 @@ func (s *AuthService) Authenticate(ctx context.Context, accessToken string) (*Au
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	if uid != claims.UserID || !expiresAt.After(s.nowFunc().UTC()) {
+	if session.UserID != claims.UserID || !session.ExpiresAt.After(s.nowFunc().UTC()) {
 		return nil, errno.ErrUnauthorized
 	}
 

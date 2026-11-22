@@ -18,26 +18,17 @@ var (
 	ErrDuplicateUsername = errors.New("repository: duplicate username")
 )
 
-// UserRepository 定义 users 表数据访问接口。
-type UserRepository interface {
-	Create(ctx context.Context, user *model.User) error
-	FindAuthByUsername(ctx context.Context, username string) (*model.UserAuthRecord, error)
-	FindByID(ctx context.Context, id uint64) (*model.User, error)
-	FindProfileByID(ctx context.Context, id uint64) (*model.UserProfileCache, error)
-	GetStatusByID(ctx context.Context, id uint64) (int8, error)
-	UpdateProfileFields(ctx context.Context, id uint64, fields map[string]any) error
-}
-
-type userRepository struct {
+// UserRepository 封装基于 GORM 的 users 表数据访问。
+type UserRepository struct {
 	db *gorm.DB
 }
 
 // NewUserRepository 构造基于 GORM 的用户仓储实例。
-func NewUserRepository(db *gorm.DB) UserRepository {
-	return &userRepository{db: db}
+func NewUserRepository(db *gorm.DB) *UserRepository {
+	return &UserRepository{db: db}
 }
 
-func (r *userRepository) Create(ctx context.Context, user *model.User) error {
+func (r *UserRepository) Create(ctx context.Context, user *model.User) error {
 	if err := r.db.WithContext(ctx).Create(user).Error; err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrDuplicateUsername
@@ -47,7 +38,7 @@ func (r *userRepository) Create(ctx context.Context, user *model.User) error {
 	return nil
 }
 
-func (r *userRepository) FindAuthByUsername(ctx context.Context, username string) (*model.UserAuthRecord, error) {
+func (r *UserRepository) FindAuthByUsername(ctx context.Context, username string) (*model.UserAuthRecord, error) {
 	var rec model.UserAuthRecord
 	err := r.db.WithContext(ctx).
 		Table("users").
@@ -63,22 +54,7 @@ func (r *userRepository) FindAuthByUsername(ctx context.Context, username string
 	return &rec, nil
 }
 
-func (r *userRepository) FindByID(ctx context.Context, id uint64) (*model.User, error) {
-	var u model.User
-	err := r.db.WithContext(ctx).
-		Select("id, username, nickname, avatar_key, bio, status, created_at, updated_at").
-		Where("id = ?", id).
-		Take(&u).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrUserNotFound
-		}
-		return nil, fmt.Errorf("user repo find by id: %w", err)
-	}
-	return &u, nil
-}
-
-func (r *userRepository) FindProfileByID(ctx context.Context, id uint64) (*model.UserProfileCache, error) {
+func (r *UserRepository) FindProfileByID(ctx context.Context, id uint64) (*model.UserProfileCache, error) {
 	var u model.User
 	err := r.db.WithContext(ctx).
 		Select("id, username, nickname, avatar_key, bio, created_at").
@@ -94,7 +70,7 @@ func (r *userRepository) FindProfileByID(ctx context.Context, id uint64) (*model
 	return &profile, nil
 }
 
-func (r *userRepository) GetStatusByID(ctx context.Context, id uint64) (int8, error) {
+func (r *UserRepository) GetStatusByID(ctx context.Context, id uint64) (int8, error) {
 	var row struct {
 		Status int8
 	}
@@ -112,7 +88,7 @@ func (r *userRepository) GetStatusByID(ctx context.Context, id uint64) (int8, er
 	return row.Status, nil
 }
 
-func (r *userRepository) UpdateProfileFields(ctx context.Context, id uint64, fields map[string]any) error {
+func (r *UserRepository) UpdateProfileFields(ctx context.Context, id uint64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
 	}
