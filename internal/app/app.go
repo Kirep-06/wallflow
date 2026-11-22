@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	stdlog "log"
 	"log/slog"
 	"os"
 	"time"
@@ -12,13 +11,12 @@ import (
 	"github.com/Kirep-06/gocache"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 
 	"wallpaper-feed/internal/cache"
 	"wallpaper-feed/internal/config"
 	"wallpaper-feed/internal/handler"
+	"wallpaper-feed/internal/infra"
 	"wallpaper-feed/internal/model"
 	"wallpaper-feed/internal/pkg/jwtutil"
 	"wallpaper-feed/internal/repository"
@@ -26,15 +24,7 @@ import (
 )
 
 const (
-	serviceName          = "wallpaper-feed"
-	startupPingTimeout   = 5 * time.Second
-	mysqlDefaultMaxOpen  = 50
-	mysqlDefaultMaxIdle  = 10
-	mysqlConnMaxLifetime = 30 * time.Minute
-	redisDialTimeout     = 3 * time.Second
-	redisReadTimeout     = 2 * time.Second
-	redisWriteTimeout    = 2 * time.Second
-
+	serviceName      = "wallpaper-feed"
 	jwtIssuer        = "wallpaper-feed"
 	accessTokenTTL   = 2 * time.Hour
 	refreshTokenTTL  = 7 * 24 * time.Hour
@@ -74,21 +64,21 @@ func NewLogger(isDev bool) *slog.Logger {
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	logger := NewLogger(cfg.IsDev())
 
-	db, err := openMySQL(ctx, cfg)
+	db, err := infra.OpenMySQL(ctx, cfg.MySQL, cfg.IsDev())
 	if err != nil {
 		return nil, err
 	}
 
-	rdb, err := openRedis(ctx, cfg.Redis)
+	rdb, err := infra.OpenRedis(ctx, cfg.Redis)
 	if err != nil {
-		closeDB(db)
+		_ = infra.CloseMySQL(db)
 		return nil, err
 	}
 
 	jwtManager, err := jwtutil.NewManager(cfg.JWTSecret, jwtIssuer, accessTokenTTL)
 	if err != nil {
 		_ = rdb.Close()
-		closeDB(db)
+		_ = infra.CloseMySQL(db)
 		return nil, fmt.Errorf("init jwt manager: %w", err)
 	}
 
@@ -119,7 +109,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	)
 	if err != nil {
 		_ = rdb.Close()
-		closeDB(db)
+		_ = infra.CloseMySQL(db)
 		return nil, fmt.Errorf("init auth service: %w", err)
 	}
 
@@ -151,88 +141,8 @@ func (a *App) Close() error {
 			errs = append(errs, fmt.Errorf("close redis: %w", err))
 		}
 	}
-	if a.DB != nil {
-		if sqlDB, err := a.DB.DB(); err == nil {
-			if err := sqlDB.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close mysql: %w", err))
-			}
-		}
+	if err := infra.CloseMySQL(a.DB); err != nil {
+		errs = append(errs, fmt.Errorf("close mysql: %w", err))
 	}
 	return errors.Join(errs...)
-}
-
-func openMySQL(ctx context.Context, cfg *config.Config) (*gorm.DB, error) {
-	logLevel := gormlogger.Warn
-	if !cfg.IsDev() {
-		logLevel = gormlogger.Error
-	}
-
-	dbLogger := gormlogger.New(
-		stdlog.New(os.Stdout, "\r\n", stdlog.LstdFlags),
-		gormlogger.Config{
-			SlowThreshold:             200 * time.Millisecond,
-			LogLevel:                  logLevel,
-			IgnoreRecordNotFoundError: true,
-			// 强制日志参数化，防止慢查询或错误日志泄露 password_hash 等敏感字段。
-			ParameterizedQueries: true,
-			Colorful:             false,
-		},
-	)
-
-	db, err := gorm.Open(mysql.Open(cfg.MySQL.DSN()), &gorm.Config{
-		TranslateError: true,
-		Logger:         dbLogger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("connect mysql: %w", err)
-	}
-
-	sqlDB, err := db.DB()
-	if err != nil {
-		return nil, fmt.Errorf("get mysql sql.DB: %w", err)
-	}
-
-	maxOpen := cfg.MySQL.MaxOpenConns
-	if maxOpen <= 0 {
-		maxOpen = mysqlDefaultMaxOpen
-	}
-	sqlDB.SetMaxOpenConns(maxOpen)
-	sqlDB.SetMaxIdleConns(min(mysqlDefaultMaxIdle, maxOpen))
-	sqlDB.SetConnMaxLifetime(mysqlConnMaxLifetime)
-
-	pingCtx, cancel := context.WithTimeout(ctx, startupPingTimeout)
-	defer cancel()
-	if err := sqlDB.PingContext(pingCtx); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("ping mysql: %w", err)
-	}
-	return db, nil
-}
-
-func openRedis(ctx context.Context, cfg config.RedisConfig) (*redis.Client, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         cfg.Addr(),
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		DialTimeout:  redisDialTimeout,
-		ReadTimeout:  redisReadTimeout,
-		WriteTimeout: redisWriteTimeout,
-	})
-
-	pingCtx, cancel := context.WithTimeout(ctx, startupPingTimeout)
-	defer cancel()
-	if err := rdb.Ping(pingCtx).Err(); err != nil {
-		_ = rdb.Close()
-		return nil, fmt.Errorf("ping redis: %w", err)
-	}
-	return rdb, nil
-}
-
-func closeDB(db *gorm.DB) {
-	if db == nil {
-		return
-	}
-	if sqlDB, err := db.DB(); err == nil {
-		_ = sqlDB.Close()
-	}
 }
