@@ -109,7 +109,7 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 
 	return &model.AuthResult{
 		TokenPair: pair,
-		User:      s.userSvc.ToUserProfile(user.ToProfileCache()),
+		User:      s.userSvc.ToUserProfile(user.ToProfileCache(), 0),
 	}, nil
 }
 
@@ -142,9 +142,14 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, err
 	}
 
+	profile, err := s.userSvc.BuildUserProfile(ctx, rec.ToProfileCache())
+	if err != nil {
+		return nil, err
+	}
+
 	return &model.AuthResult{
 		TokenPair: pair,
-		User:      s.userSvc.ToUserProfile(rec.ToProfileCache()),
+		User:      profile,
 	}, nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"wallpaper-feed/internal/pkg/jwtutil"
 	"wallpaper-feed/internal/repository"
 	"wallpaper-feed/internal/service"
+	"wallpaper-feed/internal/storage"
 )
 
 const (
@@ -32,14 +33,12 @@ const (
 	userProfileL2TTL = 30 * time.Minute
 )
 
-// App 持有后端核心依赖句柄与 HTTP 路由引擎。
+// App 持有后端运行期与关闭释放阶段所需的依赖句柄和 HTTP 路由引擎。
 type App struct {
-	Config  *config.Config
-	Logger  *slog.Logger
-	DB      *gorm.DB
-	Redis   *redis.Client
-	L1Cache *gocache.Cache
-	Router  *gin.Engine
+	Logger *slog.Logger
+	DB     *gorm.DB
+	Redis  *redis.Client
+	Router *gin.Engine
 }
 
 // NewLogger 按运行环境初始化全局 slog.Logger。
@@ -57,9 +56,19 @@ func NewLogger(isDev bool) *slog.Logger {
 	return logger
 }
 
-// New 装配 MySQL、Redis、L1 gocache、领域服务与 HTTP 路由。
+// New 装配纯内存组件（fail-fast）、MySQL、Redis、领域服务与 HTTP 路由。
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	logger := NewLogger(cfg.IsDev())
+
+	// 纯内存校验型组件前置初始化，配置异常时 fail-fast，避免无效建连与回滚清理。
+	jwtManager, err := jwtutil.NewManager(cfg.JWTSecret, jwtIssuer, accessTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("init jwt manager: %w", err)
+	}
+	store, err := storage.New(cfg.Storage)
+	if err != nil {
+		return nil, fmt.Errorf("init storage: %w", err)
+	}
 
 	db, err := infra.OpenMySQL(ctx, cfg.MySQL, cfg.IsDev())
 	if err != nil {
@@ -72,13 +81,6 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	jwtManager, err := jwtutil.NewManager(cfg.JWTSecret, jwtIssuer, accessTokenTTL)
-	if err != nil {
-		_ = rdb.Close()
-		_ = infra.CloseMySQL(db)
-		return nil, fmt.Errorf("init jwt manager: %w", err)
-	}
-
 	l1 := gocache.NewCache(l1CacheSizeBytes)
 	profileCache := cache.NewMultiLevel[model.UserProfileCache](
 		l1, rdb, userProfileL1TTL, userProfileL2TTL,
@@ -86,37 +88,23 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
+	wallpaperRepo := repository.NewWallpaperRepository(db)
 
-	userSvc := service.NewUserService(
-		userRepo,
-		profileCache,
-		cfg.Storage.CDNDomain,
-	)
-
-	authSvc := service.NewAuthService(
-		userRepo,
-		sessionRepo,
-		userSvc,
-		jwtManager,
-	)
-
-	authHandler := handler.NewAuthHandler(authSvc)
-	userHandler := handler.NewUserHandler(userSvc)
+	userSvc := service.NewUserService(userRepo, wallpaperRepo, profileCache, store)
+	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:      cfg,
 		AuthService: authSvc,
-		AuthHandler: authHandler,
-		UserHandler: userHandler,
+		AuthHandler: handler.NewAuthHandler(authSvc),
+		UserHandler: handler.NewUserHandler(userSvc),
 	})
 
 	return &App{
-		Config:  cfg,
-		Logger:  logger,
-		DB:      db,
-		Redis:   rdb,
-		L1Cache: l1,
-		Router:  router,
+		Logger: logger,
+		DB:     db,
+		Redis:  rdb,
+		Router: router,
 	}, nil
 }
 
