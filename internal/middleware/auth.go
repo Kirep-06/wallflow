@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"context"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -16,13 +15,8 @@ const (
 	ctxKeySessionID = "wf_auth_session_id"
 )
 
-// Authenticator 抽象鉴权服务，便于中间件解耦与测试。
-type Authenticator interface {
-	Authenticate(ctx context.Context, accessToken string) (*service.AuthenticatedUser, error)
-}
-
 // AuthRequired 强鉴权中间件：缺少或非法凭证返回 10003，Redis 故障 fail-closed 返回 10001。
-func AuthRequired(auth Authenticator) gin.HandlerFunc {
+func AuthRequired(authSvc *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := extractSingleBearerHeader(c)
 		if !ok {
@@ -30,7 +24,7 @@ func AuthRequired(auth Authenticator) gin.HandlerFunc {
 			return
 		}
 
-		user, err := auth.Authenticate(c.Request.Context(), token)
+		user, err := authSvc.Authenticate(c.Request.Context(), token)
 		if err != nil {
 			response.AbortWithError(c, err)
 			return
@@ -44,7 +38,7 @@ func AuthRequired(auth Authenticator) gin.HandlerFunc {
 
 // AuthOptional 可选鉴权中间件：未携带 Authorization 匿名放行（viewerID=0），
 // 携带了但格式/签名/会话非法则返回 10003，Redis 故障返回 10001。
-func AuthOptional(auth Authenticator) gin.HandlerFunc {
+func AuthOptional(authSvc *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		headers := c.Request.Header.Values("Authorization")
 		if len(headers) == 0 {
@@ -63,7 +57,7 @@ func AuthOptional(auth Authenticator) gin.HandlerFunc {
 			return
 		}
 
-		user, err := auth.Authenticate(c.Request.Context(), token)
+		user, err := authSvc.Authenticate(c.Request.Context(), token)
 		if err != nil {
 			response.AbortWithError(c, err)
 			return

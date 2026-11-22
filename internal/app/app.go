@@ -122,11 +122,10 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	userHandler := handler.NewUserHandler(userSvc)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:        cfg,
-		Logger:        logger,
-		Authenticator: authSvc,
-		AuthHandler:   authHandler,
-		UserHandler:   userHandler,
+		Config:      cfg,
+		AuthService: authSvc,
+		AuthHandler: authHandler,
+		UserHandler: userHandler,
 	})
 
 	return &App{
