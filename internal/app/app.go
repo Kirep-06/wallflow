@@ -27,12 +27,9 @@ const (
 	serviceName      = "wallpaper-feed"
 	jwtIssuer        = "wallpaper-feed"
 	accessTokenTTL   = 2 * time.Hour
-	refreshTokenTTL  = 7 * 24 * time.Hour
-	bcryptCost       = 10
 	l1CacheSizeBytes = 64 * 1024 * 1024
 	userProfileL1TTL = 30 * time.Second
 	userProfileL2TTL = 30 * time.Minute
-	defaultAvatarKey = "avatars/default.png"
 )
 
 // App 持有后端核心依赖句柄与 HTTP 路由引擎。
@@ -94,24 +91,14 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		userRepo,
 		profileCache,
 		cfg.Storage.CDNDomain,
-		defaultAvatarKey,
-		logger,
 	)
 
-	authSvc, err := service.NewAuthService(
+	authSvc := service.NewAuthService(
 		userRepo,
 		sessionRepo,
 		userSvc,
 		jwtManager,
-		refreshTokenTTL,
-		bcryptCost,
-		logger,
 	)
-	if err != nil {
-		_ = rdb.Close()
-		_ = infra.CloseMySQL(db)
-		return nil, fmt.Errorf("init auth service: %w", err)
-	}
 
 	authHandler := handler.NewAuthHandler(authSvc)
 	userHandler := handler.NewUserHandler(userSvc)

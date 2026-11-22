@@ -3,10 +3,10 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -19,12 +19,25 @@ import (
 )
 
 const (
-	minPasswordRunes = 8
-	maxPasswordRunes = 64
-	maxPasswordBytes = 72
+	sessionTTL         = 7 * 24 * time.Hour
+	passwordBcryptCost = bcrypt.DefaultCost
+	minPasswordRunes   = 8
+	maxPasswordRunes   = 64
+	maxPasswordBytes   = 72
 )
 
-var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+var (
+	usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+
+	// dummyPasswordHash 按与真实密码一致的 bcrypt 成本懒生成，用于防用户名枚举时序攻击。
+	dummyPasswordHash = sync.OnceValue(func() []byte {
+		h, err := bcrypt.GenerateFromPassword([]byte("wf-anti-enumeration-dummy-secret"), passwordBcryptCost)
+		if err != nil {
+			panic("service: init dummy password hash: " + err.Error())
+		}
+		return h
+	})
+)
 
 // AuthenticatedUser 为鉴权中间件校验通过后写入上下文的用户身份。
 type AuthenticatedUser struct {
@@ -38,44 +51,21 @@ type AuthService struct {
 	sessionRepo *repository.AuthSessionRepository
 	userSvc     *UserService
 	jwtManager  *jwtutil.Manager
-	refreshTTL  time.Duration
-	bcryptCost  int
-	dummyHash   []byte
-	nowFunc     func() time.Time
-	logger      *slog.Logger
 }
 
-// NewAuthService 构造认证领域服务，并预生成同成本 dummyHash 用于防用户名枚举。
+// NewAuthService 构造认证领域服务。
 func NewAuthService(
 	userRepo *repository.UserRepository,
 	sessionRepo *repository.AuthSessionRepository,
 	userSvc *UserService,
 	jwtManager *jwtutil.Manager,
-	refreshTTL time.Duration,
-	bcryptCost int,
-	logger *slog.Logger,
-) (*AuthService, error) {
-	if bcryptCost == 0 {
-		bcryptCost = bcrypt.DefaultCost
-	}
-	dummyHash, err := bcrypt.GenerateFromPassword([]byte("wf-anti-enumeration-dummy-secret"), bcryptCost)
-	if err != nil {
-		return nil, fmt.Errorf("auth service init dummy hash: %w", err)
-	}
-	if logger == nil {
-		logger = slog.Default()
-	}
+) *AuthService {
 	return &AuthService{
 		userRepo:    userRepo,
 		sessionRepo: sessionRepo,
 		userSvc:     userSvc,
 		jwtManager:  jwtManager,
-		refreshTTL:  refreshTTL,
-		bcryptCost:  bcryptCost,
-		dummyHash:   dummyHash,
-		nowFunc:     time.Now,
-		logger:      logger,
-	}, nil
+	}
 }
 
 // Register 注册新用户并签发初始登录会话。
@@ -92,14 +82,14 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 		return nil, err
 	}
 
-	hashBytes, err := bcrypt.GenerateFromPassword([]byte(req.Password), s.bcryptCost)
+	passwordHash, err := hashPassword(req.Password)
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
 	user := &model.User{
 		Username:     username,
-		PasswordHash: string(hashBytes),
+		PasswordHash: passwordHash,
 		Nickname:     nickname,
 		Status:       model.UserStatusActive,
 	}
@@ -131,20 +121,20 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, errno.ErrInvalidParam.WithMessage("用户名和密码不能为空")
 	}
 	if len(req.Password) > maxPasswordBytes {
-		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte("invalid-len"))
+		compareDummyPassword(req.Password)
 		return nil, errno.ErrInvalidCredentials
 	}
 
 	rec, err := s.userRepo.FindAuthByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
-			_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(req.Password))
+			compareDummyPassword(req.Password)
 			return nil, errno.ErrInvalidCredentials
 		}
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(rec.PasswordHash), []byte(req.Password)); err != nil {
+	if !verifyPassword(rec.PasswordHash, req.Password) {
 		return nil, errno.ErrInvalidCredentials
 	}
 
@@ -183,7 +173,7 @@ func (s *AuthService) Refresh(ctx context.Context, req model.RefreshRequest) (*m
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	now := s.nowFunc().UTC()
+	now := time.Now().UTC()
 	if !session.ExpiresAt.After(now) || !jwtutil.VerifyRefreshTokenHash(rawToken, session.RefreshSHA256) {
 		return nil, errno.ErrInvalidRefreshToken
 	}
@@ -201,19 +191,13 @@ func (s *AuthService) Refresh(ctx context.Context, req model.RefreshRequest) (*m
 		return nil, errno.ErrAccountBanned
 	}
 
-	accessToken, expiresIn, err := s.jwtManager.GenerateAccessTokenWithMaxExpiry(session.UserID, sid, session.ExpiresAt)
+	pair, newHash, err := s.issueTokenPair(session.UserID, sid, session.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, jwtutil.ErrTokenExpired) {
 			return nil, errno.ErrInvalidRefreshToken
 		}
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-
-	newRefreshToken, err := jwtutil.GenerateRefreshToken(sid)
-	if err != nil {
-		return nil, errno.ErrInternal.Wrap(err)
-	}
-	newHash := jwtutil.HashRefreshToken(newRefreshToken)
 
 	if err := s.sessionRepo.UpdateRefreshHash(ctx, sid, session.RefreshSHA256, newHash); err != nil {
 		if errors.Is(err, repository.ErrSessionNotFound) || errors.Is(err, repository.ErrSessionRefreshMismatch) {
@@ -222,12 +206,7 @@ func (s *AuthService) Refresh(ctx context.Context, req model.RefreshRequest) (*m
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	return &model.TokenPair{
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshToken,
-		TokenType:    jwtutil.TokenTypeBearer,
-		ExpiresIn:    expiresIn,
-	}, nil
+	return &pair, nil
 }
 
 // Logout 删除当前 Redis 会话，使同会话 Access 与 Refresh Token 立即全部失效。
@@ -257,7 +236,7 @@ func (s *AuthService) Authenticate(ctx context.Context, accessToken string) (*Au
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	if session.UserID != claims.UserID || !session.ExpiresAt.After(s.nowFunc().UTC()) {
+	if session.UserID != claims.UserID || !session.ExpiresAt.After(time.Now().UTC()) {
 		return nil, errno.ErrUnauthorized
 	}
 
@@ -273,13 +252,8 @@ func (s *AuthService) createSessionAndTokens(ctx context.Context, userID uint64)
 		return model.TokenPair{}, errno.ErrInternal.Wrap(err)
 	}
 
-	refreshToken, err := jwtutil.GenerateRefreshToken(sid)
-	if err != nil {
-		return model.TokenPair{}, errno.ErrInternal.Wrap(err)
-	}
-
-	expiresAt := s.nowFunc().UTC().Add(s.refreshTTL)
-	accessToken, expiresIn, err := s.jwtManager.GenerateAccessTokenWithMaxExpiry(userID, sid, expiresAt)
+	expiresAt := time.Now().UTC().Add(sessionTTL)
+	pair, refreshHash, err := s.issueTokenPair(userID, sid, expiresAt)
 	if err != nil {
 		return model.TokenPair{}, errno.ErrInternal.Wrap(err)
 	}
@@ -287,11 +261,24 @@ func (s *AuthService) createSessionAndTokens(ctx context.Context, userID uint64)
 	session := repository.AuthSession{
 		SessionID:     sid,
 		UserID:        userID,
-		RefreshSHA256: jwtutil.HashRefreshToken(refreshToken),
+		RefreshSHA256: refreshHash,
 		ExpiresAt:     expiresAt,
 	}
 	if err := s.sessionRepo.Create(ctx, session); err != nil {
 		return model.TokenPair{}, errno.ErrInternal.Wrap(err)
+	}
+	return pair, nil
+}
+
+func (s *AuthService) issueTokenPair(userID uint64, sid string, maxExpiry time.Time) (model.TokenPair, string, error) {
+	accessToken, expiresIn, err := s.jwtManager.GenerateAccessTokenWithMaxExpiry(userID, sid, maxExpiry)
+	if err != nil {
+		return model.TokenPair{}, "", err
+	}
+
+	refreshToken, err := jwtutil.GenerateRefreshToken(sid)
+	if err != nil {
+		return model.TokenPair{}, "", err
 	}
 
 	return model.TokenPair{
@@ -299,16 +286,36 @@ func (s *AuthService) createSessionAndTokens(ctx context.Context, userID uint64)
 		RefreshToken: refreshToken,
 		TokenType:    jwtutil.TokenTypeBearer,
 		ExpiresIn:    expiresIn,
-	}, nil
+	}, jwtutil.HashRefreshToken(refreshToken), nil
 }
 
 func (s *AuthService) deleteSessionBestEffort(ctx context.Context, sid string) {
 	if err := s.sessionRepo.Delete(ctx, sid); err != nil {
-		s.logger.WarnContext(ctx, "delete auth session failed",
+		slog.WarnContext(ctx, "delete auth session failed",
 			slog.String("sid", sid),
 			slog.Any("err", err),
 		)
 	}
+}
+
+func hashPassword(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte(password), passwordBcryptCost)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
+}
+
+func verifyPassword(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+func compareDummyPassword(password string) {
+	input := []byte(password)
+	if len(input) > maxPasswordBytes {
+		input = []byte("invalid-len")
+	}
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), input)
 }
 
 func validateUsername(raw string) (string, error) {

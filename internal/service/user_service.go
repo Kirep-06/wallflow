@@ -17,6 +17,7 @@ import (
 
 const (
 	userProfileKeyPrefix = "user:profile:"
+	defaultAvatarKey     = "avatars/default.png"
 	maxNicknameRunes     = 32
 	maxBioRunes          = 200
 	maxAvatarKeyLen      = 255
@@ -26,11 +27,9 @@ var avatarKeySuffixPattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
 // UserService 负责用户资料三级缓存读取、字段级更新与创作者公开主页组装。
 type UserService struct {
-	userRepo         *repository.UserRepository
-	profileCache     *cache.MultiLevel[model.UserProfileCache]
-	cdnDomain        string
-	defaultAvatarKey string
-	logger           *slog.Logger
+	userRepo     *repository.UserRepository
+	profileCache *cache.MultiLevel[model.UserProfileCache]
+	cdnDomain    string
 }
 
 // NewUserService 构造用户领域服务。
@@ -38,18 +37,11 @@ func NewUserService(
 	userRepo *repository.UserRepository,
 	profileCache *cache.MultiLevel[model.UserProfileCache],
 	cdnDomain string,
-	defaultAvatarKey string,
-	logger *slog.Logger,
 ) *UserService {
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &UserService{
-		userRepo:         userRepo,
-		profileCache:     profileCache,
-		cdnDomain:        strings.TrimRight(strings.TrimSpace(cdnDomain), "/"),
-		defaultAvatarKey: strings.TrimLeft(strings.TrimSpace(defaultAvatarKey), "/"),
-		logger:           logger,
+		userRepo:     userRepo,
+		profileCache: profileCache,
+		cdnDomain:    strings.TrimRight(strings.TrimSpace(cdnDomain), "/"),
 	}
 }
 
@@ -123,7 +115,7 @@ func (s *UserService) InvalidateProfileCache(ctx context.Context, userID uint64)
 		return
 	}
 	if err := s.profileCache.Delete(ctx, userProfileKey(userID)); err != nil {
-		s.logger.WarnContext(ctx, "invalidate user profile cache failed",
+		slog.WarnContext(ctx, "invalidate user profile cache failed",
 			slog.Uint64("user_id", userID),
 			slog.Any("err", err),
 		)
@@ -152,10 +144,7 @@ func (s *UserService) BuildAvatarURL(avatarKey string) string {
 	}
 	key := strings.TrimLeft(strings.TrimSpace(avatarKey), "/")
 	if key == "" {
-		key = s.defaultAvatarKey
-	}
-	if key == "" {
-		return ""
+		key = defaultAvatarKey
 	}
 	return s.cdnDomain + "/" + key
 }
