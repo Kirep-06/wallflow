@@ -4,8 +4,12 @@ import (
 	"container/heap"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +18,7 @@ import (
 
 	"wallpaper-feed/internal/cache"
 	"wallpaper-feed/internal/model"
+	"wallpaper-feed/internal/pkg/cursor"
 	"wallpaper-feed/internal/pkg/errno"
 	"wallpaper-feed/internal/pkg/response"
 	"wallpaper-feed/internal/repository"
@@ -23,41 +28,223 @@ const (
 	maxBigVFanoutRead        = 200
 	outboxRebuildConcurrency = 8
 	feedRebuildTimeout       = 5 * time.Second
+	hotFallbackKey           = "hot_top"
 )
 
-// FeedServiceDeps 聚合关注流读服务所需的仓储、缓存与装配依赖。
+// HotFeedResult 封装热门榜读取结果与首屏弱 ETag / 304 协商状态。
+type HotFeedResult struct {
+	Page        *response.PageData[model.WallpaperSummary]
+	ETag        string
+	NotModified bool
+}
+
+// FeedServiceDeps 聚合关注流与热门榜读服务所需的仓储、缓存与装配依赖。
 type FeedServiceDeps struct {
 	FollowRepo        *repository.FollowRepository
 	WallpaperRepo     *repository.WallpaperRepository
 	FollowingIDsCache *cache.MultiLevel[[]uint64]
 	BigVSet           *cache.BigVSet
 	FollowingFeed     *cache.FollowingFeed
+	HotRank           *cache.HotRank
 	WallpaperSvc      *WallpaperService
 }
 
-// FeedService 实现推拉结合关注流：收/发件箱懒重建、最大堆 K 路归并去重与全局安全水位线无缝冷补查。
+// FeedService 实现推拉结合关注流与重力时间衰减热门榜（含首屏 ETag/304 与 singleflight 降级）。
 type FeedService struct {
 	followRepo        *repository.FollowRepository
 	wallpaperRepo     *repository.WallpaperRepository
 	followingIDsCache *cache.MultiLevel[[]uint64]
 	bigVSet           *cache.BigVSet
 	followingFeed     *cache.FollowingFeed
+	hotRank           *cache.HotRank
 	wallpaperSvc      *WallpaperService
+	hotBatchLoader    func(ctx context.Context, beforeID uint64, limit int) ([]model.HotRankCandidate, error)
 
-	inboxSF  singleflight.Group
-	outboxSF singleflight.Group
+	inboxSF       singleflight.Group
+	outboxSF      singleflight.Group
+	hotFallbackSF singleflight.Group
 }
 
-// NewFeedService 构造推拉结合关注流读服务。
+// NewFeedService 构造信息流读服务。
 func NewFeedService(deps FeedServiceDeps) *FeedService {
+	var hotBatchLoader func(ctx context.Context, beforeID uint64, limit int) ([]model.HotRankCandidate, error)
+	if deps.WallpaperRepo != nil {
+		hotBatchLoader = deps.WallpaperRepo.ListHotRankBatch
+	}
 	return &FeedService{
 		followRepo:        deps.FollowRepo,
 		wallpaperRepo:     deps.WallpaperRepo,
 		followingIDsCache: deps.FollowingIDsCache,
 		bigVSet:           deps.BigVSet,
 		followingFeed:     deps.FollowingFeed,
+		hotRank:           deps.HotRank,
 		wallpaperSvc:      deps.WallpaperSvc,
+		hotBatchLoader:    hotBatchLoader,
 	}
+}
+
+// ListHotFeed 返回全站热门壁纸榜 Top 100（可选鉴权、ScoreCursor 复合游标分页、首屏弱 ETag / 304 协商与 Redis 故障降级）。
+func (s *FeedService) ListHotFeed(
+	ctx context.Context,
+	viewerID uint64,
+	rawCursor string,
+	rawLimit int,
+	ifNoneMatch string,
+) (*HotFeedResult, error) {
+	limit, err := normalizeListLimit(rawLimit)
+	if err != nil {
+		return nil, err
+	}
+	scoreCur, err := parseScoreCursor(rawCursor)
+	if err != nil {
+		return nil, err
+	}
+
+	isFirstPage := scoreCur == nil
+	var candidateVer string
+	var matchedVers []string
+	if isFirstPage {
+		candidateVer, matchedVers = parseHotIfNoneMatch(ifNoneMatch, limit, viewerID)
+	}
+
+	var (
+		entries []model.HotRankEntry
+		etag    string
+		fromHot bool
+	)
+	if s.hotRank != nil {
+		snap, err := s.hotRank.ReadSnapshot(ctx, candidateVer)
+		if err != nil {
+			slog.WarnContext(ctx, "read hot rank snapshot degraded to mysql",
+				slog.Uint64("viewer_id", viewerID),
+				slog.Any("err", err),
+			)
+		} else if snap.Ready {
+			fromHot = true
+			if isFirstPage {
+				etag = formatHotETag(snap.Version, limit, viewerID)
+			}
+			if etag != "" && (snap.NotModified || slices.Contains(matchedVers, snap.Version)) {
+				return &HotFeedResult{ETag: etag, NotModified: true}, nil
+			}
+			entries = snap.Entries
+		}
+	}
+
+	if !fromHot {
+		entries, err = s.loadHotFallbackEntries(ctx)
+		if err != nil {
+			return nil, errno.ErrInternal.Wrap(err)
+		}
+	}
+
+	var afterScore float64
+	var afterID uint64
+	if scoreCur != nil {
+		afterScore = scoreCur.Score
+		afterID = scoreCur.ID
+	}
+	pageEntries, hasMore := model.SliceHotPage(entries, afterScore, afterID, scoreCur != nil, limit)
+
+	pageIDs := make([]uint64, len(pageEntries))
+	for i, e := range pageEntries {
+		pageIDs[i] = e.WallpaperID
+	}
+	var nextCursor string
+	if hasMore && len(pageEntries) > 0 {
+		last := pageEntries[len(pageEntries)-1]
+		nextCursor, err = cursor.Encode(cursor.ScoreCursor{Score: last.Score, ID: last.WallpaperID})
+		if err != nil {
+			return nil, errno.ErrInternal.Wrap(err)
+		}
+	}
+
+	page, err := s.wallpaperSvc.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{
+		viewerID: viewerID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &HotFeedResult{Page: page, ETag: etag}, nil
+}
+
+func (s *FeedService) loadHotFallbackEntries(ctx context.Context) ([]model.HotRankEntry, error) {
+	if s.hotBatchLoader == nil {
+		return []model.HotRankEntry{}, nil
+	}
+	ch := s.hotFallbackSF.DoChan(hotFallbackKey, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedRebuildTimeout)
+		defer cancel()
+		return model.ComputeHotTopN(loadCtx, s.hotBatchLoader, time.Now().UTC())
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		entries, ok := res.Val.([]model.HotRankEntry)
+		if !ok {
+			return nil, errors.New("service: unexpected hot rank fallback type")
+		}
+		return entries, nil
+	}
+}
+
+func parseScoreCursor(raw string) (*cursor.ScoreCursor, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	c, err := cursor.Decode[cursor.ScoreCursor](raw)
+	if err != nil {
+		return nil, err
+	}
+	if c.ID == 0 || math.IsNaN(c.Score) || math.IsInf(c.Score, 0) || c.Score <= 0 {
+		return nil, cursor.ErrInvalid
+	}
+	return &c, nil
+}
+
+func formatHotETag(version string, limit int, viewerID uint64) string {
+	if version == "" {
+		return ""
+	}
+	return fmt.Sprintf(`W/"hot-%s-l%d-u%d"`, version, limit, viewerID)
+}
+
+func parseHotIfNoneMatch(header string, limit int, viewerID uint64) (string, []string) {
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return "", nil
+	}
+	if trimmed == "*" {
+		return "*", []string{"*"}
+	}
+
+	suffix := fmt.Sprintf("-l%d-u%d", limit, viewerID)
+	var matched []string
+	for part := range strings.SplitSeq(trimmed, ",") {
+		tag := strings.TrimSpace(part)
+		if tag == "*" {
+			return "*", []string{"*"}
+		}
+		tag = strings.TrimPrefix(tag, "W/")
+		if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+			continue
+		}
+		opaque := tag[1 : len(tag)-1]
+		if !strings.HasPrefix(opaque, "hot-") || !strings.HasSuffix(opaque, suffix) {
+			continue
+		}
+		if ver := opaque[len("hot-") : len(opaque)-len(suffix)]; ver != "" {
+			matched = append(matched, ver)
+		}
+	}
+	if len(matched) == 1 {
+		return matched[0], matched
+	}
+	return "", matched
 }
 
 // ListFollowingFeed 返回当前登录用户的关注流瀑布流（强制鉴权，按 wallpaper.id 倒序游标分页）。

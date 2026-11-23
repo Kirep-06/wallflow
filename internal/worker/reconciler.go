@@ -22,6 +22,10 @@ const (
 	statsReconcileTimeout     = 30 * time.Second
 	statsReconcileBatchSize   = 100
 	statsReconcileQuietWindow = 10 * time.Second
+
+	// M7 热门榜 Top 100 重力时间衰减定时快照参数
+	hotRankReconcileInterval = 5 * time.Minute
+	hotRankReconcileTimeout  = 30 * time.Second
 )
 
 // runPeriodic 启动立即执行一次任务，随后按固定周期执行直至 ctx 取消。
@@ -247,4 +251,41 @@ func (r *StatsReconciler) reconcileOnce(parentCtx, runCtx context.Context) {
 		slog.Int("fixed", len(changedKeys)),
 		slog.Duration("cost", time.Since(start)),
 	)
+}
+
+// HotRankReconciler 负责启动预热并每 5m 按重力时间衰减公式重算 Top 100 原子切换至 Redis rank:hot:top。
+type HotRankReconciler struct {
+	wallpaperRepo *repository.WallpaperRepository
+	hotRank       *cache.HotRank
+}
+
+// NewHotRankReconciler 构造热门榜定时快照任务。
+func NewHotRankReconciler(wallpaperRepo *repository.WallpaperRepository, hotRank *cache.HotRank) *HotRankReconciler {
+	return &HotRankReconciler{wallpaperRepo: wallpaperRepo, hotRank: hotRank}
+}
+
+// Run 启动热门榜定时刷新循环直至 ctx 取消。
+func (r *HotRankReconciler) Run(ctx context.Context) {
+	runPeriodic(ctx, hotRankReconcileInterval, hotRankReconcileTimeout, func(runCtx context.Context) {
+		start := time.Now()
+		entries, err := model.ComputeHotTopN(runCtx, r.wallpaperRepo.ListHotRankBatch, start.UTC())
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(runCtx, "hot rank reconcile query mysql failed", slog.Any("err", err))
+			}
+			return
+		}
+		ver, err := r.hotRank.Swap(runCtx, entries)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(runCtx, "hot rank reconcile redis swap failed", slog.Int("count", len(entries)), slog.Any("err", err))
+			}
+			return
+		}
+		slog.InfoContext(runCtx, "hot rank reconciled",
+			slog.Int("count", len(entries)),
+			slog.String("version", ver),
+			slog.Duration("cost", time.Since(start)),
+		)
+	})
 }

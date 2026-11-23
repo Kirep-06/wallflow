@@ -113,6 +113,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	latestFeed := cache.NewLatestFeed(rdb)
 	bigVSet := cache.NewBigVSet(rdb, cache.BigVL1TTL)
 	followingFeed := cache.NewFollowingFeed(rdb)
+	hotRank := cache.NewHotRank(rdb)
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
@@ -146,6 +147,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	wpOpts := []service.WallpaperOption{
 		service.WithWallpaperFollowingFeed(followingFeed),
+		service.WithWallpaperHotRank(hotRank),
 		service.WithWallpaperInteraction(interactionRepo, wallpaperStatsCache),
 	}
 	if outboxRelay != nil {
@@ -165,6 +167,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		FollowingIDsCache: followingIDsCache,
 		BigVSet:           bigVSet,
 		FollowingFeed:     followingFeed,
+		HotRank:           hotRank,
 		WallpaperSvc:      wallpaperSvc,
 	})
 	interactionSvc := service.NewInteractionService(interactionRepo, wallpaperSvc, userSvc, lightPub)

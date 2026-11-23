@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
 	"wallpaper-feed/internal/middleware"
@@ -9,7 +11,7 @@ import (
 	"wallpaper-feed/internal/service"
 )
 
-// FeedHandler 处理推拉结合关注流与后续信息流 HTTP 接口。
+// FeedHandler 处理推拉结合关注流与热门榜 HTTP 接口。
 type FeedHandler struct {
 	feedSvc *service.FeedService
 }
@@ -34,4 +36,34 @@ func (h *FeedHandler) ListFollowingFeed(c *gin.Context) {
 		return
 	}
 	response.OK(c, res)
+}
+
+// ListHotFeed 处理 GET /api/v1/feed/hot（AuthOptional，支持首屏弱 ETag / 304 协商）。
+func (h *FeedHandler) ListHotFeed(c *gin.Context) {
+	limit, err := cursor.ParseLimit(c.Query("limit"), cursor.DefaultLimit, cursor.MaxLimit)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+
+	viewerID := middleware.GetUserID(c)
+	res, err := h.feedSvc.ListHotFeed(c.Request.Context(), viewerID, c.Query("cursor"), limit, c.GetHeader("If-None-Match"))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+
+	if res.ETag != "" {
+		c.Header("ETag", res.ETag)
+		c.Header("Cache-Control", "private, no-cache")
+		c.Writer.Header().Add("Vary", "Authorization")
+		if res.NotModified {
+			c.Status(http.StatusNotModified)
+			return
+		}
+	} else {
+		c.Header("Cache-Control", "private, no-store")
+	}
+
+	response.OK(c, res.Page)
 }

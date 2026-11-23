@@ -69,6 +69,13 @@ func WithWallpaperFollowingFeed(ff *cache.FollowingFeed) WallpaperOption {
 	}
 }
 
+// WithWallpaperHotRank 注入热门榜缓存，用于作者软删壁纸时顺带移除在榜记录并递增版本号。
+func WithWallpaperHotRank(hr *cache.HotRank) WallpaperOption {
+	return func(s *WallpaperService) {
+		s.hotRank = hr
+	}
+}
+
 // WithWallpaperInteraction 注入互动仓储与计数三级缓存，无环点亮全站壁纸计数与当前用户点赞/收藏态。
 func WithWallpaperInteraction(
 	repo *repository.InteractionRepository,
@@ -98,6 +105,7 @@ type WallpaperService struct {
 	statsCache      *cache.MultiLevel[model.WallpaperStatsCache]
 	latestFeed      *cache.LatestFeed
 	followingFeed   *cache.FollowingFeed
+	hotRank         *cache.HotRank
 	outboxNotifier  OutboxNotifier
 	store           storage.StorageService
 }
@@ -298,10 +306,18 @@ func (s *WallpaperService) DeleteWallpaper(ctx context.Context, userID, wallpape
 		return errno.ErrInternal.Wrap(err)
 	}
 
-	// 软删后先删 L1 + sf.Forget 再删 L2，并从最新流与作者发件箱移除（失败仅告警不回滚事务）。
+	// 软删后先删 L1 + sf.Forget 再删 L2，并从最新流、作者发件箱与热门榜移除（失败仅告警不回滚事务）。
 	s.invalidateDetailCache(ctx, wallpaperID)
 	s.removeLatestFeed(ctx, wallpaperID)
 	s.removeFromAuthorOutbox(ctx, userID, wallpaperID)
+	if s.hotRank != nil {
+		if err := s.hotRank.Remove(ctx, wallpaperID); err != nil {
+			slog.WarnContext(ctx, "remove deleted wallpaper from hot rank failed",
+				slog.Uint64("wallpaper_id", wallpaperID),
+				slog.Any("err", err),
+			)
+		}
+	}
 	return nil
 }
 

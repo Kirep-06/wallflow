@@ -65,10 +65,12 @@ func main() {
 	latestFeed := cache.NewLatestFeed(rdb)
 	bigVSet := cache.NewBigVSet(rdb, 0)
 	followingFeed := cache.NewFollowingFeed(rdb)
+	hotRank := cache.NewHotRank(rdb)
 
 	latestReconciler := worker.NewLatestFeedReconciler(wallpaperRepo, latestFeed)
 	bigVReconciler := worker.NewBigVReconciler(followRepo, bigVSet)
 	statsReconciler := worker.NewStatsReconciler(wallpaperRepo, interactionRepo, rdb)
+	hotRankReconciler := worker.NewHotRankReconciler(wallpaperRepo, hotRank)
 
 	var (
 		mqClient            *mq.Client
@@ -94,6 +96,10 @@ func main() {
 	})
 	g.Go(func() error {
 		statsReconciler.Run(gctx)
+		return nil
+	})
+	g.Go(func() error {
+		hotRankReconciler.Run(gctx)
 		return nil
 	})
 	if fanoutConsumer != nil {

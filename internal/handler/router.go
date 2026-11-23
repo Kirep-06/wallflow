@@ -23,7 +23,7 @@ type RouterDeps struct {
 	InteractionHandler *InteractionHandler
 }
 
-// NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M6）。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M7）。
 func NewRouter(deps RouterDeps) *gin.Engine {
 	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
@@ -97,8 +97,9 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		// M6: 一级评论管理
 		v1.DELETE("/comments/:id", authRequired, deps.InteractionHandler.DeleteComment)
 
-		// M5: 推拉结合关注流
+		// M5 / M7: 推拉结合关注流与全站热门榜
 		v1.GET("/feed/following", authRequired, deps.FeedHandler.ListFollowingFeed)
+		v1.GET("/feed/hot", authOptional, deps.FeedHandler.ListHotFeed)
 	}
 
 	return r
