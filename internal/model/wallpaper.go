@@ -97,6 +97,34 @@ type WallpaperOwnerRecord struct {
 	Status uint8
 }
 
+// WallpaperDetailCache 为 wallpaper:detail:{id} 三级缓存快照结构。
+// 仅保存相对 object_key 与不可变静态元数据（含只读分类与不可变绑定标签），
+// 严格隔离可变作者资料（user:profile:{uid}）与高频互动计数（M6 wallpaper:stats:{id}）。
+type WallpaperDetailCache struct {
+	ID          uint64       `json:"id,string"`
+	UserID      uint64       `json:"user_id,string"`
+	CategoryID  uint64       `json:"category_id,string"`
+	Title       string       `json:"title"`
+	Description string       `json:"description"`
+	ObjectKey   string       `json:"object_key"`
+	Width       uint32       `json:"width"`
+	Height      uint32       `json:"height"`
+	Orientation uint8        `json:"orientation"`
+	Is4K        bool         `json:"is_4k"`
+	SizeBytes   uint64       `json:"size_bytes"`
+	Category    CategoryItem `json:"category"`
+	Tags        []TagItem    `json:"tags"`
+	CreatedAt   time.Time    `json:"created_at"`
+}
+
+// WallpaperListQuery 为发现页画廊列表与分类/标签单维互斥筛选查询参数。
+type WallpaperListQuery struct {
+	Cursor     string
+	Limit      int
+	CategoryID uint64
+	TagID      uint64
+}
+
 // CalcOrientation 按 ±5% 容差计算壁纸方向（1-横屏 2-竖屏 3-方图）。
 func CalcOrientation(width, height uint32) uint8 {
 	if width == 0 || height == 0 {
@@ -194,6 +222,24 @@ type WallpaperDetail struct {
 	CommentCount  uint64          `json:"comment_count"`
 	Category      CategoryItem    `json:"category"`
 	Tags          []TagItem       `json:"tags"`
+	Author        WallpaperAuthor `json:"author"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// WallpaperSummary 为壁纸瀑布流卡片摘要响应结构。
+type WallpaperSummary struct {
+	ID            uint64          `json:"id,string"`
+	Title         string          `json:"title"`
+	ThumbURL      string          `json:"thumb_url"`
+	Width         uint32          `json:"width"`
+	Height        uint32          `json:"height"`
+	Orientation   uint8           `json:"orientation"`
+	Is4K          bool            `json:"is_4k"`
+	LikeCount     uint64          `json:"like_count"`
+	FavCount      uint64          `json:"fav_count"`
+	DownloadCount uint64          `json:"download_count"`
+	CommentCount  uint64          `json:"comment_count"`
+	Category      CategoryItem    `json:"category"`
 	Author        WallpaperAuthor `json:"author"`
 	CreatedAt     time.Time       `json:"created_at"`
 }

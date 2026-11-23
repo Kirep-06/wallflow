@@ -67,6 +67,25 @@ func (r *UserRepository) FindProfileByID(ctx context.Context, id uint64) (*model
 	return &profile, nil
 }
 
+// FindProfilesByIDs 按主键集合批量查询用户公开资料快照，用于三级缓存批量回源。
+func (r *UserRepository) FindProfilesByIDs(ctx context.Context, ids []uint64) (map[uint64]model.UserProfileCache, error) {
+	if len(ids) == 0 {
+		return map[uint64]model.UserProfileCache{}, nil
+	}
+	var users []model.User
+	if err := r.db.WithContext(ctx).
+		Select("id, username, nickname, avatar_key, bio, created_at").
+		Where("id IN ?", ids).
+		Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("user repo find profiles by ids: %w", err)
+	}
+	result := make(map[uint64]model.UserProfileCache, len(users))
+	for i := range users {
+		result[users[i].ID] = users[i].ToProfileCache()
+	}
+	return result, nil
+}
+
 func (r *UserRepository) ExistsByID(ctx context.Context, id uint64) (bool, error) {
 	var row struct {
 		ID uint64
