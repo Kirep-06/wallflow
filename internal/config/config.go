@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/spf13/viper"
 )
 
@@ -16,9 +17,12 @@ const (
 	EnvJWTSecret         = "WF_AUTH_JWT_SECRET"
 	EnvQiniuAccessKey    = "WF_STORAGE_QINIU_ACCESS_KEY"
 	EnvQiniuSecretKey    = "WF_STORAGE_QINIU_SECRET_KEY"
+	EnvRabbitMQPassword  = "WF_RABBITMQ_PASSWORD"
 	MinJWTSecretLen      = 32
 	StorageProviderNoop  = "noop"
 	StorageProviderQiniu = "qiniu"
+	defaultRabbitMQPort  = 5672
+	defaultRabbitMQVhost = "/"
 )
 
 var qiniuZoneUploadURLs = map[string]string{
@@ -32,11 +36,12 @@ var qiniuZoneUploadURLs = map[string]string{
 
 // Config 为应用全局配置结构。
 type Config struct {
-	Server    ServerConfig  `mapstructure:"server"`
-	MySQL     MySQLConfig   `mapstructure:"mysql"`
-	Redis     RedisConfig   `mapstructure:"redis"`
-	Storage   StorageConfig `mapstructure:"storage"`
-	JWTSecret string        `mapstructure:"-"`
+	Server    ServerConfig   `mapstructure:"server"`
+	MySQL     MySQLConfig    `mapstructure:"mysql"`
+	Redis     RedisConfig    `mapstructure:"redis"`
+	RabbitMQ  RabbitMQConfig `mapstructure:"rabbitmq"`
+	Storage   StorageConfig  `mapstructure:"storage"`
+	JWTSecret string         `mapstructure:"-"`
 }
 
 // ServerConfig 为 HTTP 服务运行配置。
@@ -61,6 +66,16 @@ type RedisConfig struct {
 	Port     int    `mapstructure:"port"`
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
+}
+
+// RabbitMQConfig 为 RabbitMQ 连接配置（支持 enabled 开关与 WF_RABBITMQ_PASSWORD 环境变量覆盖）。
+type RabbitMQConfig struct {
+	Enabled  bool   `mapstructure:"enabled"`
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	Vhost    string `mapstructure:"vhost"`
 }
 
 // StorageConfig 为对象存储与 CDN 域名配置。
@@ -103,7 +118,39 @@ func Load(path string) (*Config, error) {
 	if err := normalizeAndValidateStorage(&cfg.Storage); err != nil {
 		return nil, err
 	}
+	if err := normalizeAndValidateRabbitMQ(&cfg.RabbitMQ); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+func normalizeAndValidateRabbitMQ(r *RabbitMQConfig) error {
+	r.Host = strings.TrimSpace(r.Host)
+	r.User = strings.TrimSpace(r.User)
+	r.Vhost = strings.TrimSpace(r.Vhost)
+	if envPass, ok := os.LookupEnv(EnvRabbitMQPassword); ok && envPass != "" {
+		r.Password = envPass
+	}
+
+	if !r.Enabled {
+		return nil
+	}
+	if r.Host == "" {
+		return fmt.Errorf("config: rabbitmq.host is required when rabbitmq.enabled=true")
+	}
+	if r.User == "" {
+		return fmt.Errorf("config: rabbitmq.user is required when rabbitmq.enabled=true")
+	}
+	if r.Port == 0 {
+		r.Port = defaultRabbitMQPort
+	}
+	if r.Port < 0 || r.Port > 65535 {
+		return fmt.Errorf("config: invalid rabbitmq.port %d", r.Port)
+	}
+	if r.Vhost == "" {
+		r.Vhost = defaultRabbitMQVhost
+	}
+	return nil
 }
 
 func normalizeAndValidateStorage(s *StorageConfig) error {
@@ -175,4 +222,34 @@ func (s ServerConfig) Addr() string {
 func (m MySQLConfig) DSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=UTC",
 		m.User, m.Password, m.Host, m.Port, m.DBName)
+}
+
+// URI 使用 amqp.URI 规范编码拼装 RabbitMQ 连接串（严禁明文字符串拼接密码）。
+func (r RabbitMQConfig) URI() string {
+	port := r.Port
+	if port <= 0 {
+		port = defaultRabbitMQPort
+	}
+	vhost := r.Vhost
+	if vhost == "" {
+		vhost = defaultRabbitMQVhost
+	}
+	return (amqp.URI{
+		Scheme:   "amqp",
+		Host:     r.Host,
+		Port:     port,
+		Username: r.User,
+		Password: r.Password,
+		Vhost:    vhost,
+	}).String()
+}
+
+// SafeAddr 返回不含用户名与密码的脱敏 RabbitMQ 地址，专供日志输出。
+func (r RabbitMQConfig) SafeAddr() string {
+	port := r.Port
+	if port <= 0 {
+		port = defaultRabbitMQPort
+	}
+	vhost := strings.TrimPrefix(r.Vhost, "/")
+	return fmt.Sprintf("%s:%d/%s", r.Host, port, vhost)
 }

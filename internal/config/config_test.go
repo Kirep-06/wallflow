@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 func writeTempConfig(t *testing.T, content string) string {
@@ -38,6 +40,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.Storage.Provider != StorageProviderNoop {
 		t.Fatalf("unexpected default storage provider: %q", cfg.Storage.Provider)
+	}
+	if cfg.RabbitMQ.Enabled {
+		t.Fatalf("expected default rabbitmq.enabled=false")
 	}
 
 	t.Setenv(EnvJWTSecret, "short")
@@ -161,6 +166,79 @@ func TestLoadStorageConfig(t *testing.T) {
 		u, err := cfg.Storage.Qiniu.ResolveUploadURL()
 		if err != nil || u != "https://custom-up.example.com" {
 			t.Fatalf("ResolveUploadURL() = (%q, %v)", u, err)
+		}
+	})
+}
+
+func TestLoadRabbitMQConfig(t *testing.T) {
+	validJWT := "0123456789abcdef0123456789abcdef"
+
+	t.Run("disabled skips validation", func(t *testing.T) {
+		t.Setenv(EnvJWTSecret, validJWT)
+		t.Setenv(EnvRabbitMQPassword, "")
+		path := writeTempConfig(t, "rabbitmq:\n  enabled: false\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.RabbitMQ.Enabled {
+			t.Fatal("expected rabbitmq disabled")
+		}
+	})
+
+	t.Run("enabled validates required host user and port", func(t *testing.T) {
+		cases := []struct {
+			name string
+			yaml string
+		}{
+			{name: "missing host", yaml: "rabbitmq:\n  enabled: true\n  user: guest\n"},
+			{name: "missing user", yaml: "rabbitmq:\n  enabled: true\n  host: 127.0.0.1\n"},
+			{name: "port out of range", yaml: "rabbitmq:\n  enabled: true\n  host: 127.0.0.1\n  user: guest\n  port: 70000\n"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv(EnvJWTSecret, validJWT)
+				t.Setenv(EnvRabbitMQPassword, "")
+				path := writeTempConfig(t, tc.yaml)
+				if _, err := Load(path); err == nil {
+					t.Fatalf("expected error for case %q", tc.name)
+				}
+			})
+		}
+	})
+
+	t.Run("env password overrides yaml and URI escapes special chars", func(t *testing.T) {
+		t.Setenv(EnvJWTSecret, validJWT)
+		specialPass := "p@ss:w/rd#1?%20"
+		t.Setenv(EnvRabbitMQPassword, specialPass)
+		path := writeTempConfig(t, "rabbitmq:\n  enabled: true\n  host: mq.local\n  user: wp_user\n  password: yaml-password\n  vhost: /wallpaper\n")
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.RabbitMQ.Port != 5672 {
+			t.Fatalf("port = %d, want default 5672", cfg.RabbitMQ.Port)
+		}
+		if cfg.RabbitMQ.Password != specialPass {
+			t.Fatalf("password not overridden by env")
+		}
+
+		rawURI := cfg.RabbitMQ.URI()
+		if strings.Contains(rawURI, specialPass) {
+			t.Fatalf("URI must percent-encode special characters, got %q", rawURI)
+		}
+		parsed, err := amqp.ParseURI(rawURI)
+		if err != nil {
+			t.Fatalf("amqp.ParseURI(%q) failed: %v", rawURI, err)
+		}
+		if parsed.Host != "mq.local" || parsed.Port != 5672 || parsed.Username != "wp_user" || parsed.Password != specialPass || parsed.Vhost != "/wallpaper" {
+			t.Fatalf("round-trip parsed URI mismatch: %+v", parsed)
+		}
+
+		safe := cfg.RabbitMQ.SafeAddr()
+		if safe != "mq.local:5672/wallpaper" || strings.Contains(safe, specialPass) || strings.Contains(safe, "wp_user") {
+			t.Fatalf("unexpected SafeAddr: %q", safe)
 		}
 	})
 }
