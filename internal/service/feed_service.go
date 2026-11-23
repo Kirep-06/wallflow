@@ -95,9 +95,12 @@ func (s *FeedService) ListFollowingFeed(
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	// 复用 M3 两段式 MultiLevel.MGet 装配，并叠加有序关注集二分兜底过滤并发取关残余。
-	return s.wallpaperSvc.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, nil, func(authorID uint64) bool {
-		return containsSortedID(followingIDs, authorID)
+	// 复用 M3 两段式 MultiLevel.MGet 装配，点亮计数与互动态并叠加有序关注集二分兜底过滤并发取关残余。
+	return s.wallpaperSvc.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{
+		viewerID: userID,
+		allowAuthor: func(authorID uint64) bool {
+			return containsSortedID(followingIDs, authorID)
+		},
 	})
 }
 

@@ -69,16 +69,37 @@ func WithWallpaperFollowingFeed(ff *cache.FollowingFeed) WallpaperOption {
 	}
 }
 
+// WithWallpaperInteraction 注入互动仓储与计数三级缓存，无环点亮全站壁纸计数与当前用户点赞/收藏态。
+func WithWallpaperInteraction(
+	repo *repository.InteractionRepository,
+	statsCache *cache.MultiLevel[model.WallpaperStatsCache],
+) WallpaperOption {
+	return func(s *WallpaperService) {
+		s.interactionRepo = repo
+		s.statsCache = statsCache
+	}
+}
+
+type summaryAssembleOpts struct {
+	fixedAuthor    *model.WallpaperAuthor
+	allowAuthor    func(userID uint64) bool
+	viewerID       uint64
+	knownLiked     bool
+	knownFavorited bool
+}
+
 // WallpaperService 负责分类/标签直查、壁纸投稿软删、三级缓存详情以及冷热分离画廊列表。
 type WallpaperService struct {
-	metaRepo       *repository.MetaRepository
-	wallpaperRepo  *repository.WallpaperRepository
-	userSvc        *UserService
-	wallpaperCache *cache.MultiLevel[model.WallpaperDetailCache]
-	latestFeed     *cache.LatestFeed
-	followingFeed  *cache.FollowingFeed
-	outboxNotifier OutboxNotifier
-	store          storage.StorageService
+	metaRepo        *repository.MetaRepository
+	wallpaperRepo   *repository.WallpaperRepository
+	interactionRepo *repository.InteractionRepository
+	userSvc         *UserService
+	wallpaperCache  *cache.MultiLevel[model.WallpaperDetailCache]
+	statsCache      *cache.MultiLevel[model.WallpaperStatsCache]
+	latestFeed      *cache.LatestFeed
+	followingFeed   *cache.FollowingFeed
+	outboxNotifier  OutboxNotifier
+	store           storage.StorageService
 }
 
 // NewWallpaperService 构造壁纸领域服务。
@@ -284,8 +305,8 @@ func (s *WallpaperService) DeleteWallpaper(ctx context.Context, userID, wallpape
 	return nil
 }
 
-// GetWallpaperDetail 通过三级缓存获取壁纸公开详情并动态组装原图/缩略图 URL 与作者信息。
-func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID uint64) (*model.WallpaperDetail, error) {
+// GetWallpaperDetail 通过三级缓存获取壁纸公开详情并动态组装原图/缩略图 URL、作者信息、实时计数与用户互动态。
+func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, viewerID uint64) (*model.WallpaperDetail, error) {
 	cached, err := s.getCachedDetail(ctx, wallpaperID)
 	if err != nil {
 		if errors.Is(err, cache.ErrNotFound) {
@@ -301,6 +322,26 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID u
 		} else {
 			return nil, err
 		}
+	}
+
+	stats, err := getWallpaperStats(ctx, s.statsCache, s.interactionRepo, wallpaperID)
+	if err != nil {
+		return nil, err
+	}
+
+	var isLiked, isFavorited bool
+	if viewerID > 0 && s.interactionRepo != nil {
+		singleID := []uint64{wallpaperID}
+		likedSet, err := s.interactionRepo.BatchCheckRelations(ctx, model.InteractionKindLike, viewerID, singleID)
+		if err != nil {
+			return nil, errno.ErrInternal.Wrap(err)
+		}
+		favSet, err := s.interactionRepo.BatchCheckRelations(ctx, model.InteractionKindFavorite, viewerID, singleID)
+		if err != nil {
+			return nil, errno.ErrInternal.Wrap(err)
+		}
+		_, isLiked = likedSet[wallpaperID]
+		_, isFavorited = favSet[wallpaperID]
 	}
 
 	mime, _ := storage.MimeFromObjectKey(cached.ObjectKey)
@@ -321,10 +362,12 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID u
 		Is4K:          cached.Is4K,
 		SizeBytes:     cached.SizeBytes,
 		Mime:          mime,
-		LikeCount:     0, // M6 由 wallpaper_stats 承载
-		FavCount:      0,
-		DownloadCount: 0,
-		CommentCount:  0,
+		LikeCount:     stats.LikeCount,
+		FavCount:      stats.FavCount,
+		DownloadCount: stats.DownloadCount,
+		CommentCount:  stats.CommentCount,
+		IsLiked:       isLiked,
+		IsFavorited:   isFavorited,
 		Category:      cached.Category,
 		Tags:          tags,
 		Author:        author,
@@ -333,7 +376,7 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID u
 }
 
 // ListWallpapers 返回发现页最新流（热窗口冷热分离）或按分类/标签单维互斥筛选的画廊瀑布流。
-func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.WallpaperListQuery) (*response.PageData[model.WallpaperSummary], error) {
+func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.WallpaperListQuery, viewerID uint64) (*response.PageData[model.WallpaperSummary], error) {
 	if query.CategoryID > 0 && query.TagID > 0 {
 		return nil, errno.ErrInvalidParam.WithMessage("category_id 与 tag_id 不能同时传入")
 	}
@@ -364,11 +407,11 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, nil, nil)
+	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{viewerID: viewerID})
 }
 
 // ListUserWallpapers 返回指定创作者公开主页的已发布壁纸流（用户不存在返回 404/20003）。
-func (s *WallpaperService) ListUserWallpapers(ctx context.Context, targetUserID uint64, rawCursor string, rawLimit int) (*response.PageData[model.WallpaperSummary], error) {
+func (s *WallpaperService) ListUserWallpapers(ctx context.Context, targetUserID, viewerID uint64, rawCursor string, rawLimit int) (*response.PageData[model.WallpaperSummary], error) {
 	limit, err := normalizeListLimit(rawLimit)
 	if err != nil {
 		return nil, err
@@ -393,7 +436,31 @@ func (s *WallpaperService) ListUserWallpapers(ctx context.Context, targetUserID 
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, &author, nil)
+	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{
+		fixedAuthor: &author,
+		viewerID:    viewerID,
+	})
+}
+
+func (s *WallpaperService) ensureWallpaperActive(ctx context.Context, wallpaperID uint64) error {
+	if _, err := s.getCachedDetail(ctx, wallpaperID); err != nil {
+		if errors.Is(err, cache.ErrNotFound) {
+			return errno.ErrWallpaperNotFound
+		}
+		return errno.ErrInternal.Wrap(err)
+	}
+	return nil
+}
+
+func (s *WallpaperService) findWallpaperOwnerID(ctx context.Context, wallpaperID uint64) (uint64, error) {
+	rec, err := s.wallpaperRepo.FindOwnerByID(ctx, wallpaperID)
+	if err != nil {
+		if errors.Is(err, repository.ErrWallpaperNotFound) {
+			return 0, nil
+		}
+		return 0, errno.ErrInternal.Wrap(err)
+	}
+	return rec.UserID, nil
 }
 
 func (s *WallpaperService) getCachedDetail(ctx context.Context, wallpaperID uint64) (model.WallpaperDetailCache, error) {
@@ -474,8 +541,7 @@ func (s *WallpaperService) assembleSummaryPage(
 	pageIDs []uint64,
 	nextCursor string,
 	hasMore bool,
-	fixedAuthor *model.WallpaperAuthor,
-	allowAuthor func(userID uint64) bool,
+	opts summaryAssembleOpts,
 ) (*response.PageData[model.WallpaperSummary], error) {
 	if len(pageIDs) == 0 {
 		page := response.NewPageData[model.WallpaperSummary](nil, nextCursor, hasMore)
@@ -514,10 +580,11 @@ func (s *WallpaperService) assembleSummaryPage(
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	// 按原序列保序过滤已软删/不存在的幽灵 ID（以及可选作者白名单），并收拢去重作者 ID。
+	// 按原序列保序过滤已软删/不存在的幽灵 ID（以及可选作者白名单），并收拢有效壁纸 ID 与去重作者 ID。
 	ordered := make([]model.WallpaperDetailCache, 0, len(pageIDs))
+	orderedWPIDs := make([]uint64, 0, len(pageIDs))
 	var userIDs []uint64
-	if fixedAuthor == nil {
+	if opts.fixedAuthor == nil {
 		userIDs = make([]uint64, 0, len(pageIDs))
 	}
 	seenUsers := make(map[uint64]struct{}, len(pageIDs))
@@ -526,11 +593,12 @@ func (s *WallpaperService) assembleSummaryPage(
 		if !ok {
 			continue
 		}
-		if allowAuthor != nil && !allowAuthor(d.UserID) {
+		if opts.allowAuthor != nil && !opts.allowAuthor(d.UserID) {
 			continue
 		}
 		ordered = append(ordered, d)
-		if fixedAuthor == nil {
+		orderedWPIDs = append(orderedWPIDs, d.ID)
+		if opts.fixedAuthor == nil {
 			if _, dup := seenUsers[d.UserID]; !dup {
 				seenUsers[d.UserID] = struct{}{}
 				userIDs = append(userIDs, d.UserID)
@@ -539,10 +607,31 @@ func (s *WallpaperService) assembleSummaryPage(
 	}
 
 	var authors map[uint64]model.WallpaperAuthor
-	if fixedAuthor == nil && len(userIDs) > 0 {
+	if opts.fixedAuthor == nil && len(userIDs) > 0 {
 		authors, err = s.userSvc.GetAuthorsByIDs(ctx, userIDs)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	statsMap, err := mgetWallpaperStats(ctx, s.statsCache, s.interactionRepo, orderedWPIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var likedSet, favSet map[uint64]struct{}
+	if opts.viewerID > 0 && len(orderedWPIDs) > 0 && s.interactionRepo != nil {
+		if !opts.knownLiked {
+			likedSet, err = s.interactionRepo.BatchCheckRelations(ctx, model.InteractionKindLike, opts.viewerID, orderedWPIDs)
+			if err != nil {
+				return nil, errno.ErrInternal.Wrap(err)
+			}
+		}
+		if !opts.knownFavorited {
+			favSet, err = s.interactionRepo.BatchCheckRelations(ctx, model.InteractionKindFavorite, opts.viewerID, orderedWPIDs)
+			if err != nil {
+				return nil, errno.ErrInternal.Wrap(err)
+			}
 		}
 	}
 
@@ -550,12 +639,22 @@ func (s *WallpaperService) assembleSummaryPage(
 	for i := range ordered {
 		wp := ordered[i]
 		var author model.WallpaperAuthor
-		if fixedAuthor != nil {
-			author = *fixedAuthor
+		if opts.fixedAuthor != nil {
+			author = *opts.fixedAuthor
 		} else if a, ok := authors[wp.UserID]; ok {
 			author = a
 		} else {
 			author = s.fallbackAuthor(wp.UserID)
+		}
+
+		stats := statsMap[wp.ID]
+		isLiked := opts.knownLiked
+		if !isLiked {
+			_, isLiked = likedSet[wp.ID]
+		}
+		isFavorited := opts.knownFavorited
+		if !isFavorited {
+			_, isFavorited = favSet[wp.ID]
 		}
 
 		items = append(items, model.WallpaperSummary{
@@ -566,10 +665,12 @@ func (s *WallpaperService) assembleSummaryPage(
 			Height:        wp.Height,
 			Orientation:   wp.Orientation,
 			Is4K:          wp.Is4K,
-			LikeCount:     0, // M6 由 wallpaper_stats 承载
-			FavCount:      0,
-			DownloadCount: 0,
-			CommentCount:  0,
+			LikeCount:     stats.LikeCount,
+			FavCount:      stats.FavCount,
+			DownloadCount: stats.DownloadCount,
+			CommentCount:  stats.CommentCount,
+			IsLiked:       isLiked,
+			IsFavorited:   isFavorited,
 			Category:      wp.Category,
 			Author:        author,
 			CreatedAt:     wp.CreatedAt.UTC(),

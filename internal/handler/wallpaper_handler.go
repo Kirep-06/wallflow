@@ -43,7 +43,7 @@ func (h *WallpaperHandler) ListWallpapers(c *gin.Context) {
 		Limit:      limit,
 		CategoryID: categoryID,
 		TagID:      tagID,
-	})
+	}, middleware.GetUserID(c))
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -59,7 +59,7 @@ func (h *WallpaperHandler) GetWallpaperDetail(c *gin.Context) {
 		return
 	}
 
-	res, err := h.wallpaperSvc.GetWallpaperDetail(c.Request.Context(), wallpaperID)
+	res, err := h.wallpaperSvc.GetWallpaperDetail(c.Request.Context(), wallpaperID, middleware.GetUserID(c))
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -80,7 +80,7 @@ func (h *WallpaperHandler) ListUserWallpapers(c *gin.Context) {
 		return
 	}
 
-	res, err := h.wallpaperSvc.ListUserWallpapers(c.Request.Context(), targetUserID, c.Query("cursor"), limit)
+	res, err := h.wallpaperSvc.ListUserWallpapers(c.Request.Context(), targetUserID, middleware.GetUserID(c), c.Query("cursor"), limit)
 	if err != nil {
 		response.Fail(c, err)
 		return

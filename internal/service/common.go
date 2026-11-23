@@ -208,3 +208,111 @@ func containsSortedID(sortedIDs []uint64, target uint64) bool {
 	_, ok := slices.BinarySearch(sortedIDs, target)
 	return ok
 }
+
+func getWallpaperStats(
+	ctx context.Context,
+	statsCache *cache.MultiLevel[model.WallpaperStatsCache],
+	interactionRepo *repository.InteractionRepository,
+	wallpaperID uint64,
+) (model.WallpaperStatsCache, error) {
+	if wallpaperID == 0 {
+		return model.WallpaperStatsCache{}, nil
+	}
+	if statsCache == nil {
+		if interactionRepo == nil {
+			return model.WallpaperStatsCache{}, nil
+		}
+		stats, err := interactionRepo.FindStatsByWallpaperID(ctx, wallpaperID)
+		if err != nil {
+			return model.WallpaperStatsCache{}, errno.ErrInternal.Wrap(err)
+		}
+		return stats, nil
+	}
+
+	stats, err := statsCache.Get(ctx, cache.WallpaperStatsKey(wallpaperID), func(loadCtx context.Context) (model.WallpaperStatsCache, error) {
+		if interactionRepo == nil {
+			return model.WallpaperStatsCache{}, nil
+		}
+		return interactionRepo.FindStatsByWallpaperID(loadCtx, wallpaperID)
+	})
+	if err != nil {
+		return model.WallpaperStatsCache{}, errno.ErrInternal.Wrap(err)
+	}
+	return stats, nil
+}
+
+func mgetWallpaperStats(
+	ctx context.Context,
+	statsCache *cache.MultiLevel[model.WallpaperStatsCache],
+	interactionRepo *repository.InteractionRepository,
+	wallpaperIDs []uint64,
+) (map[uint64]model.WallpaperStatsCache, error) {
+	out := make(map[uint64]model.WallpaperStatsCache, len(wallpaperIDs))
+	if len(wallpaperIDs) == 0 {
+		return out, nil
+	}
+
+	keys := make([]string, 0, len(wallpaperIDs))
+	keyToID := make(map[string]uint64, len(wallpaperIDs))
+	uniqueIDs := make([]uint64, 0, len(wallpaperIDs))
+	for _, id := range wallpaperIDs {
+		if id == 0 {
+			continue
+		}
+		k := cache.WallpaperStatsKey(id)
+		if _, dup := keyToID[k]; dup {
+			continue
+		}
+		keyToID[k] = id
+		keys = append(keys, k)
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(keys) == 0 {
+		return out, nil
+	}
+
+	if statsCache == nil {
+		if interactionRepo == nil {
+			return out, nil
+		}
+		found, err := interactionRepo.FindStatsByWallpaperIDs(ctx, uniqueIDs)
+		if err != nil {
+			return nil, errno.ErrInternal.Wrap(err)
+		}
+		return found, nil
+	}
+
+	cached, err := statsCache.MGet(ctx, keys, func(loadCtx context.Context, missKeys []string) (map[string]model.WallpaperStatsCache, error) {
+		missIDs := make([]uint64, 0, len(missKeys))
+		for _, k := range missKeys {
+			if id, ok := keyToID[k]; ok {
+				missIDs = append(missIDs, id)
+			}
+		}
+		res := make(map[string]model.WallpaperStatsCache, len(missIDs))
+		if interactionRepo == nil {
+			for _, id := range missIDs {
+				res[cache.WallpaperStatsKey(id)] = model.WallpaperStatsCache{}
+			}
+			return res, nil
+		}
+		found, err := interactionRepo.FindStatsByWallpaperIDs(loadCtx, missIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range missIDs {
+			res[cache.WallpaperStatsKey(id)] = found[id]
+		}
+		return res, nil
+	})
+	if err != nil {
+		return nil, errno.ErrInternal.Wrap(err)
+	}
+
+	for k, v := range cached {
+		if id, ok := keyToID[k]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}

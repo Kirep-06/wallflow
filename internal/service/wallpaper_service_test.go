@@ -183,12 +183,12 @@ func TestListWallpapersValidation(t *testing.T) {
 		CategoryID: 1,
 		TagID:      2,
 		Limit:      20,
-	}); !errors.Is(err, errno.ErrInvalidParam) {
+	}, 0); !errors.Is(err, errno.ErrInvalidParam) {
 		t.Fatalf("both category_id and tag_id err = %v, want ErrInvalidParam", err)
 	}
 
 	// limit 越界返回 10002。
-	if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{Limit: 51}); !errors.Is(err, errno.ErrInvalidParam) {
+	if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{Limit: 51}, 0); !errors.Is(err, errno.ErrInvalidParam) {
 		t.Fatalf("limit=51 err = %v, want ErrInvalidParam", err)
 	}
 
@@ -198,7 +198,7 @@ func TestListWallpapersValidation(t *testing.T) {
 		t.Fatalf("encode zero cursor: %v", err)
 	}
 	for _, bad := range []string{"not-base64!!!", zeroCursor} {
-		if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{Cursor: bad, Limit: 20}); !errors.Is(err, errno.ErrInvalidCursor) {
+		if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{Cursor: bad, Limit: 20}, 0); !errors.Is(err, errno.ErrInvalidCursor) {
 			t.Fatalf("bad cursor %q err = %v, want ErrInvalidCursor", bad, err)
 		}
 	}
@@ -314,7 +314,7 @@ func TestAssembleSummaryPage_SkipsGhostIDsAndFallbackAuthor(t *testing.T) {
 	_ = mr.Set("user:profile:1", string(u1))
 	_ = mr.Set("user:profile:2", cache.NilMarker)
 
-	page, err := svc.assembleSummaryPage(context.Background(), []uint64{10, 9, 8}, "next-cur", true, nil, nil)
+	page, err := svc.assembleSummaryPage(context.Background(), []uint64{10, 9, 8}, "next-cur", true, summaryAssembleOpts{})
 	if err != nil {
 		t.Fatalf("assembleSummaryPage failed: %v", err)
 	}
