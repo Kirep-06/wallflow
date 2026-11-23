@@ -25,12 +25,14 @@ import (
 )
 
 const (
-	serviceName      = "wallpaper-feed"
-	jwtIssuer        = "wallpaper-feed"
-	accessTokenTTL   = 2 * time.Hour
-	l1CacheSizeBytes = 64 * 1024 * 1024
-	userProfileL1TTL = 30 * time.Second
-	userProfileL2TTL = 30 * time.Minute
+	serviceName              = "wallpaper-feed"
+	jwtIssuer                = "wallpaper-feed"
+	accessTokenTTL           = 2 * time.Hour
+	l1CacheSizeBytes         = 64 * 1024 * 1024
+	userProfileL1TTL         = 30 * time.Second
+	userProfileL2TTL         = 30 * time.Minute
+	wallpaperDetailL1TTL     = 30 * time.Second
+	wallpaperDetailColdL2TTL = 10 * time.Minute
 )
 
 // App 持有后端运行期与关闭释放阶段所需的依赖句柄和 HTTP 路由引擎。
@@ -85,6 +87,11 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	profileCache := cache.NewMultiLevel[model.UserProfileCache](
 		l1, rdb, userProfileL1TTL, userProfileL2TTL,
 	)
+	wallpaperCache := cache.NewMultiLevel(
+		l1, rdb, wallpaperDetailL1TTL, wallpaperDetailColdL2TTL,
+		cache.WithL2TTLFunc(service.WallpaperDetailL2TTL),
+	)
+	latestFeed := cache.NewLatestFeed(rdb)
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
@@ -94,7 +101,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	userSvc := service.NewUserService(userRepo, wallpaperRepo, profileCache, store)
 	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
 	uploadSvc := service.NewUploadService(store)
-	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, store)
+	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, wallpaperCache, latestFeed, store)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		IsDev:            cfg.IsDev(),

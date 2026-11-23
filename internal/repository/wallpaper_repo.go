@@ -285,7 +285,7 @@ func listWallpaperIDs(q *gorm.DB, idCol string, beforeID uint64, limit int, op s
 		q = q.Where(idCol+" < ?", beforeID)
 	}
 	ids := make([]uint64, 0, limit)
-	if err := q.Select(idCol).Order(idCol + " DESC").Limit(limit).Pluck(idCol, &ids).Error; err != nil {
+	if err := q.Select(idCol).Order(idCol+" DESC").Limit(limit).Pluck(idCol, &ids).Error; err != nil {
 		return nil, fmt.Errorf("wallpaper repo %s: %w", op, err)
 	}
 	return ids, nil

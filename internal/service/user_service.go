@@ -126,12 +126,67 @@ func (s *UserService) GetAuthor(ctx context.Context, userID uint64) (model.Wallp
 		}
 		return model.WallpaperAuthor{}, errno.ErrInternal.Wrap(err)
 	}
+	return s.toWallpaperAuthor(cached), nil
+}
+
+// GetAuthorsByIDs 通过三级缓存 MGet 批量获取作者展示信息，用于列表页消除 N+1 查询。
+func (s *UserService) GetAuthorsByIDs(ctx context.Context, userIDs []uint64) (map[uint64]model.WallpaperAuthor, error) {
+	if len(userIDs) == 0 {
+		return map[uint64]model.WallpaperAuthor{}, nil
+	}
+
+	keys := make([]string, 0, len(userIDs))
+	keyToID := make(map[string]uint64, len(userIDs))
+	for _, uid := range userIDs {
+		if uid == 0 {
+			continue
+		}
+		k := userProfileKey(uid)
+		if _, dup := keyToID[k]; dup {
+			continue
+		}
+		keyToID[k] = uid
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return map[uint64]model.WallpaperAuthor{}, nil
+	}
+
+	profiles, err := s.profileCache.MGet(ctx, keys, func(loadCtx context.Context, missKeys []string) (map[string]model.UserProfileCache, error) {
+		missIDs := make([]uint64, 0, len(missKeys))
+		for _, k := range missKeys {
+			if uid, ok := keyToID[k]; ok {
+				missIDs = append(missIDs, uid)
+			}
+		}
+		found, err := s.userRepo.FindProfilesByIDs(loadCtx, missIDs)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]model.UserProfileCache, len(found))
+		for uid, p := range found {
+			out[userProfileKey(uid)] = p
+		}
+		return out, nil
+	})
+	if err != nil {
+		return nil, errno.ErrInternal.Wrap(err)
+	}
+
+	authors := make(map[uint64]model.WallpaperAuthor, len(profiles))
+	for _, p := range profiles {
+		authors[p.ID] = s.toWallpaperAuthor(p)
+	}
+	return authors, nil
+}
+
+func (s *UserService) toWallpaperAuthor(p model.UserProfileCache) model.WallpaperAuthor {
 	return model.WallpaperAuthor{
-		ID:        cached.ID,
-		Username:  cached.Username,
-		Nickname:  cached.Nickname,
-		AvatarURL: s.BuildAvatarURL(cached.AvatarKey),
-	}, nil
+		ID:        p.ID,
+		Username:  p.Username,
+		Nickname:  p.Nickname,
+		AvatarURL: s.BuildAvatarURL(p.AvatarKey),
+	}
 }
 
 // InvalidateProfileCache 失效指定用户的 L1 + L2 资料缓存。
