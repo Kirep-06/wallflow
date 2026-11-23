@@ -22,26 +22,38 @@ const (
 	maxBioRunes          = 200
 )
 
+// UserServiceDeps 聚合用户领域服务所需依赖，保持与下层仓储/缓存的单向无环装配。
+type UserServiceDeps struct {
+	UserRepo          *repository.UserRepository
+	WallpaperRepo     *repository.WallpaperRepository
+	FollowRepo        *repository.FollowRepository
+	ProfileCache      *cache.MultiLevel[model.UserProfileCache]
+	FollowStatsCache  *cache.MultiLevel[model.FollowStatsCache]
+	FollowingIDsCache *cache.MultiLevel[[]uint64]
+	Store             storage.StorageService
+}
+
 // UserService 负责用户资料三级缓存读取、字段级更新、创作者公开主页与作者信息组装。
 type UserService struct {
-	userRepo      *repository.UserRepository
-	wallpaperRepo *repository.WallpaperRepository
-	profileCache  *cache.MultiLevel[model.UserProfileCache]
-	store         storage.StorageService
+	userRepo          *repository.UserRepository
+	wallpaperRepo     *repository.WallpaperRepository
+	followRepo        *repository.FollowRepository
+	profileCache      *cache.MultiLevel[model.UserProfileCache]
+	followStatsCache  *cache.MultiLevel[model.FollowStatsCache]
+	followingIDsCache *cache.MultiLevel[[]uint64]
+	store             storage.StorageService
 }
 
 // NewUserService 构造用户领域服务。
-func NewUserService(
-	userRepo *repository.UserRepository,
-	wallpaperRepo *repository.WallpaperRepository,
-	profileCache *cache.MultiLevel[model.UserProfileCache],
-	store storage.StorageService,
-) *UserService {
+func NewUserService(deps UserServiceDeps) *UserService {
 	return &UserService{
-		userRepo:      userRepo,
-		wallpaperRepo: wallpaperRepo,
-		profileCache:  profileCache,
-		store:         store,
+		userRepo:          deps.UserRepo,
+		wallpaperRepo:     deps.WallpaperRepo,
+		followRepo:        deps.FollowRepo,
+		profileCache:      deps.ProfileCache,
+		followStatsCache:  deps.FollowStatsCache,
+		followingIDsCache: deps.FollowingIDsCache,
+		store:             deps.Store,
 	}
 }
 
@@ -97,8 +109,8 @@ func (s *UserService) PatchMe(ctx context.Context, userID uint64, req model.Patc
 	return &profile, nil
 }
 
-// GetPublicProfile 通过三级缓存查看创作者公开主页（关注计数与 is_following 留待 M4 接入）。
-func (s *UserService) GetPublicProfile(ctx context.Context, targetID uint64, _ uint64) (*model.UserPublicProfile, error) {
+// GetPublicProfile 通过三级缓存查看创作者公开主页（含真实关注/粉丝数与 is_following 状态）。
+func (s *UserService) GetPublicProfile(ctx context.Context, targetID, viewerID uint64) (*model.UserPublicProfile, error) {
 	cached, err := s.getCachedProfile(ctx, targetID)
 	if err != nil {
 		if errors.Is(err, cache.ErrNotFound) {
@@ -111,10 +123,31 @@ func (s *UserService) GetPublicProfile(ctx context.Context, targetID uint64, _ u
 	if err != nil {
 		return nil, err
 	}
+
+	isFollowing := false
+	if viewerID > 0 && viewerID != targetID {
+		followingIDs, err := getFollowingIDs(ctx, s.followingIDsCache, s.followRepo, viewerID)
+		if err != nil {
+			return nil, err
+		}
+		isFollowing = containsSortedID(followingIDs, targetID)
+	}
+
 	return &model.UserPublicProfile{
 		UserProfile: profile,
-		IsFollowing: false,
+		IsFollowing: isFollowing,
 	}, nil
+}
+
+// EnsureExists 通过用户资料三级缓存校验目标用户是否存在（自动享受空值缓存防穿透）。
+func (s *UserService) EnsureExists(ctx context.Context, userID uint64) error {
+	if _, err := s.getCachedProfile(ctx, userID); err != nil {
+		if errors.Is(err, cache.ErrNotFound) {
+			return errno.ErrUserNotFound
+		}
+		return errno.ErrInternal.Wrap(err)
+	}
+	return nil
 }
 
 // GetAuthor 返回壁纸详情内嵌的作者展示信息。
@@ -129,10 +162,10 @@ func (s *UserService) GetAuthor(ctx context.Context, userID uint64) (model.Wallp
 	return s.toWallpaperAuthor(cached), nil
 }
 
-// GetAuthorsByIDs 通过三级缓存 MGet 批量获取作者展示信息，用于列表页消除 N+1 查询。
-func (s *UserService) GetAuthorsByIDs(ctx context.Context, userIDs []uint64) (map[uint64]model.WallpaperAuthor, error) {
+// GetProfilesByIDs 通过三级缓存 MGet 批量获取公开用户资料快照，供列表页消除 N+1 查询。
+func (s *UserService) GetProfilesByIDs(ctx context.Context, userIDs []uint64) (map[uint64]model.UserProfileCache, error) {
 	if len(userIDs) == 0 {
-		return map[uint64]model.WallpaperAuthor{}, nil
+		return map[uint64]model.UserProfileCache{}, nil
 	}
 
 	keys := make([]string, 0, len(userIDs))
@@ -149,7 +182,7 @@ func (s *UserService) GetAuthorsByIDs(ctx context.Context, userIDs []uint64) (ma
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return map[uint64]model.WallpaperAuthor{}, nil
+		return map[uint64]model.UserProfileCache{}, nil
 	}
 
 	profiles, err := s.profileCache.MGet(ctx, keys, func(loadCtx context.Context, missKeys []string) (map[string]model.UserProfileCache, error) {
@@ -173,9 +206,22 @@ func (s *UserService) GetAuthorsByIDs(ctx context.Context, userIDs []uint64) (ma
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	authors := make(map[uint64]model.WallpaperAuthor, len(profiles))
+	out := make(map[uint64]model.UserProfileCache, len(profiles))
 	for _, p := range profiles {
-		authors[p.ID] = s.toWallpaperAuthor(p)
+		out[p.ID] = p
+	}
+	return out, nil
+}
+
+// GetAuthorsByIDs 通过三级缓存 MGet 批量获取作者展示信息，用于壁纸列表页消除 N+1 查询。
+func (s *UserService) GetAuthorsByIDs(ctx context.Context, userIDs []uint64) (map[uint64]model.WallpaperAuthor, error) {
+	profiles, err := s.GetProfilesByIDs(ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	authors := make(map[uint64]model.WallpaperAuthor, len(profiles))
+	for uid, p := range profiles {
+		authors[uid] = s.toWallpaperAuthor(p)
 	}
 	return authors, nil
 }
@@ -202,25 +248,34 @@ func (s *UserService) InvalidateProfileCache(ctx context.Context, userID uint64)
 	}
 }
 
-// BuildUserProfile 直查用户已发布壁纸总数并组装完整 UserProfile DTO。
+// BuildUserProfile 查询用户已发布壁纸总数与关注统计，组装完整 UserProfile DTO。
 func (s *UserService) BuildUserProfile(ctx context.Context, p model.UserProfileCache) (model.UserProfile, error) {
-	count, err := s.wallpaperRepo.CountActiveByUserID(ctx, p.ID)
-	if err != nil {
-		return model.UserProfile{}, errno.ErrInternal.Wrap(err)
+	var wpCount int64
+	if s.wallpaperRepo != nil {
+		var err error
+		wpCount, err = s.wallpaperRepo.CountActiveByUserID(ctx, p.ID)
+		if err != nil {
+			return model.UserProfile{}, errno.ErrInternal.Wrap(err)
+		}
 	}
-	return s.ToUserProfile(p, count), nil
+
+	stats, err := getFollowStats(ctx, s.followStatsCache, s.followRepo, p.ID)
+	if err != nil {
+		return model.UserProfile{}, err
+	}
+	return s.ToUserProfile(p, wpCount, stats), nil
 }
 
-// ToUserProfile 将缓存资料结构与作品数转换为对外 HTTP DTO。
-func (s *UserService) ToUserProfile(p model.UserProfileCache, wallpaperCount int64) model.UserProfile {
+// ToUserProfile 将缓存资料结构、作品数与关注统计转换为对外 HTTP DTO。
+func (s *UserService) ToUserProfile(p model.UserProfileCache, wallpaperCount int64, stats model.FollowStatsCache) model.UserProfile {
 	return model.UserProfile{
 		ID:             p.ID,
 		Username:       p.Username,
 		Nickname:       p.Nickname,
 		AvatarURL:      s.BuildAvatarURL(p.AvatarKey),
 		Bio:            p.Bio,
-		FollowingCount: 0,
-		FollowerCount:  0,
+		FollowingCount: stats.FollowingCount,
+		FollowerCount:  stats.FollowerCount,
 		WallpaperCount: wallpaperCount,
 		CreatedAt:      p.CreatedAt.UTC(),
 	}

@@ -582,30 +582,6 @@ func (s *WallpaperService) fallbackAuthor(userID uint64) model.WallpaperAuthor {
 	}
 }
 
-func normalizeListLimit(limit int) (int, error) {
-	if limit == 0 {
-		return cursor.DefaultLimit, nil
-	}
-	if limit < cursor.MinLimit || limit > cursor.MaxLimit {
-		return 0, errno.ErrInvalidParam.WithMessage("limit 参数不合法")
-	}
-	return limit, nil
-}
-
-func parseIDCursor(raw string) (uint64, error) {
-	if raw == "" {
-		return 0, nil
-	}
-	c, err := cursor.Decode[cursor.IDCursor](raw)
-	if err != nil {
-		return 0, err
-	}
-	if c.ID == 0 {
-		return 0, cursor.ErrInvalid
-	}
-	return c.ID, nil
-}
-
 func paginateIDs(rawIDs []uint64, limit int) (pageIDs []uint64, nextCursor string, hasMore bool, err error) {
 	if len(rawIDs) <= limit {
 		return rawIDs, "", false, nil

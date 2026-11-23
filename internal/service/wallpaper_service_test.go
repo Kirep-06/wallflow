@@ -289,7 +289,10 @@ func TestAssembleSummaryPage_SkipsGhostIDsAndFallbackAuthor(t *testing.T) {
 	profileCache := cache.NewMultiLevel[model.UserProfileCache](l1, rdb, 30*time.Second, 30*time.Minute)
 	wallpaperCache := cache.NewMultiLevel(l1, rdb, 30*time.Second, 10*time.Minute, cache.WithL2TTLFunc(WallpaperDetailL2TTL))
 	store := &stubStorage{}
-	userSvc := NewUserService(nil, nil, profileCache, store)
+	userSvc := NewUserService(UserServiceDeps{
+		ProfileCache: profileCache,
+		Store:        store,
+	})
 	svc := NewWallpaperService(nil, nil, userSvc, wallpaperCache, nil, store)
 
 	// 预灌缓存：壁纸 10（正常作者 1）、壁纸 9（幽灵空值哨兵）、壁纸 8（作者 2 缺失空值哨兵）。

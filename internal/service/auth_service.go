@@ -109,7 +109,7 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 
 	return &model.AuthResult{
 		TokenPair: pair,
-		User:      s.userSvc.ToUserProfile(user.ToProfileCache(), 0),
+		User:      s.userSvc.ToUserProfile(user.ToProfileCache(), 0, model.FollowStatsCache{}),
 	}, nil
 }
 

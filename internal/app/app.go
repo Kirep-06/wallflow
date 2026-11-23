@@ -33,6 +33,10 @@ const (
 	userProfileL2TTL         = 30 * time.Minute
 	wallpaperDetailL1TTL     = 30 * time.Second
 	wallpaperDetailColdL2TTL = 10 * time.Minute
+	followStatsL1TTL         = 15 * time.Second
+	followStatsL2TTL         = 10 * time.Minute
+	followingIDsL1TTL        = 15 * time.Second
+	followingIDsL2TTL        = 10 * time.Minute
 )
 
 // App 持有后端运行期与关闭释放阶段所需的依赖句柄和 HTTP 路由引擎。
@@ -91,14 +95,29 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		l1, rdb, wallpaperDetailL1TTL, wallpaperDetailColdL2TTL,
 		cache.WithL2TTLFunc(service.WallpaperDetailL2TTL),
 	)
+	followStatsCache := cache.NewMultiLevel[model.FollowStatsCache](
+		l1, rdb, followStatsL1TTL, followStatsL2TTL,
+	)
+	followingIDsCache := cache.NewMultiLevel[[]uint64](
+		l1, rdb, followingIDsL1TTL, followingIDsL2TTL,
+	)
 	latestFeed := cache.NewLatestFeed(rdb)
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
 	metaRepo := repository.NewMetaRepository(db)
 	wallpaperRepo := repository.NewWallpaperRepository(db)
+	followRepo := repository.NewFollowRepository(db)
 
-	userSvc := service.NewUserService(userRepo, wallpaperRepo, profileCache, store)
+	userSvc := service.NewUserService(service.UserServiceDeps{
+		UserRepo:          userRepo,
+		WallpaperRepo:     wallpaperRepo,
+		FollowRepo:        followRepo,
+		ProfileCache:      profileCache,
+		FollowStatsCache:  followStatsCache,
+		FollowingIDsCache: followingIDsCache,
+		Store:             store,
+	})
 	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
 	uploadSvc := service.NewUploadService(store)
 	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, wallpaperCache, latestFeed, store)
