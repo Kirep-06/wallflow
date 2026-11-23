@@ -240,6 +240,9 @@ func (s *FeedService) loadHotStreams(
 }
 
 func (s *FeedService) rebuildInboxSingleflight(ctx context.Context, userID uint64, normalAuthors []uint64) ([]uint64, error) {
+	if s.wallpaperRepo == nil {
+		return []uint64{}, nil
+	}
 	key := strconv.FormatUint(userID, 10)
 	ch := s.inboxSF.DoChan(key, func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedRebuildTimeout)
@@ -295,6 +298,9 @@ func (s *FeedService) rebuildOutboxesBounded(
 }
 
 func (s *FeedService) rebuildOutboxSingleflight(ctx context.Context, authorID uint64, maxSize int) ([]uint64, error) {
+	if s.wallpaperRepo == nil {
+		return []uint64{}, nil
+	}
 	key := strconv.FormatUint(authorID, 10)
 	ch := s.outboxSF.DoChan(key, func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedRebuildTimeout)

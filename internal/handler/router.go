@@ -16,12 +16,13 @@ type RouterDeps struct {
 	AuthHandler      *AuthHandler
 	UserHandler      *UserHandler
 	FollowHandler    *FollowHandler
+	FeedHandler      *FeedHandler
 	MetaHandler      *MetaHandler
 	UploadHandler    *UploadHandler
 	WallpaperHandler *WallpaperHandler
 }
 
-// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2 + M3 + M4）。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M5）。
 func NewRouter(deps RouterDeps) *gin.Engine {
 	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
@@ -82,6 +83,9 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			wallpapers.POST("", authRequired, deps.WallpaperHandler.CreateWallpaper)
 			wallpapers.DELETE("/:id", authRequired, deps.WallpaperHandler.DeleteWallpaper)
 		}
+
+		// M5: 推拉结合关注流
+		v1.GET("/feed/following", authRequired, deps.FeedHandler.ListFollowingFeed)
 	}
 
 	return r

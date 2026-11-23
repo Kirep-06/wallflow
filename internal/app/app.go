@@ -18,10 +18,12 @@ import (
 	"wallpaper-feed/internal/handler"
 	"wallpaper-feed/internal/infra"
 	"wallpaper-feed/internal/model"
+	"wallpaper-feed/internal/mq"
 	"wallpaper-feed/internal/pkg/jwtutil"
 	"wallpaper-feed/internal/repository"
 	"wallpaper-feed/internal/service"
 	"wallpaper-feed/internal/storage"
+	"wallpaper-feed/internal/worker"
 )
 
 const (
@@ -39,12 +41,15 @@ const (
 	followingIDsL2TTL        = 10 * time.Minute
 )
 
-// App 持有后端运行期与关闭释放阶段所需的依赖句柄和 HTTP 路由引擎。
+// App 持有后端运行期与关闭释放阶段所需的依赖句柄、后台 OutboxRelay 与 HTTP 路由引擎。
 type App struct {
-	Logger *slog.Logger
-	DB     *gorm.DB
-	Redis  *redis.Client
-	Router *gin.Engine
+	Logger      *slog.Logger
+	DB          *gorm.DB
+	Redis       *redis.Client
+	MQConn      *mq.ConnManager
+	MQPublisher *mq.ConfirmPublisher
+	OutboxRelay *worker.OutboxRelay
+	Router      *gin.Engine
 }
 
 // NewLogger 按运行环境初始化全局 slog.Logger。
@@ -102,12 +107,26 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		l1, rdb, followingIDsL1TTL, followingIDsL2TTL,
 	)
 	latestFeed := cache.NewLatestFeed(rdb)
+	bigVSet := cache.NewBigVSet(rdb, cache.BigVL1TTL)
+	followingFeed := cache.NewFollowingFeed(rdb)
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
 	metaRepo := repository.NewMetaRepository(db)
 	wallpaperRepo := repository.NewWallpaperRepository(db)
 	followRepo := repository.NewFollowRepository(db)
+
+	var (
+		mqConn      *mq.ConnManager
+		mqPublisher *mq.ConfirmPublisher
+		outboxRelay *worker.OutboxRelay
+	)
+	if cfg.RabbitMQ.Enabled {
+		mqConn = mq.NewConnManager(cfg.RabbitMQ)
+		mqPublisher = mq.NewConfirmPublisher(mqConn)
+		outboxRepo := repository.NewOutboxRepository(db)
+		outboxRelay = worker.NewOutboxRelay(outboxRepo, mqPublisher)
+	}
 
 	userSvc := service.NewUserService(service.UserServiceDeps{
 		UserRepo:          userRepo,
@@ -120,8 +139,29 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	})
 	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
 	uploadSvc := service.NewUploadService(store)
-	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, wallpaperCache, latestFeed, store)
-	followSvc := service.NewFollowService(followRepo, userSvc, followStatsCache, followingIDsCache)
+
+	wpOpts := []service.WallpaperOption{
+		service.WithWallpaperFollowingFeed(followingFeed),
+	}
+	if outboxRelay != nil {
+		wpOpts = append(wpOpts, service.WithOutboxNotifier(outboxRelay))
+	}
+	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, wallpaperCache, latestFeed, store, wpOpts...)
+	followSvc := service.NewFollowService(
+		followRepo,
+		userSvc,
+		followStatsCache,
+		followingIDsCache,
+		service.WithFollowFeedCaches(followingFeed, bigVSet),
+	)
+	feedSvc := service.NewFeedService(service.FeedServiceDeps{
+		FollowRepo:        followRepo,
+		WallpaperRepo:     wallpaperRepo,
+		FollowingIDsCache: followingIDsCache,
+		BigVSet:           bigVSet,
+		FollowingFeed:     followingFeed,
+		WallpaperSvc:      wallpaperSvc,
+	})
 
 	router := handler.NewRouter(handler.RouterDeps{
 		IsDev:            cfg.IsDev(),
@@ -129,22 +169,36 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		AuthHandler:      handler.NewAuthHandler(authSvc),
 		UserHandler:      handler.NewUserHandler(userSvc),
 		FollowHandler:    handler.NewFollowHandler(followSvc),
+		FeedHandler:      handler.NewFeedHandler(feedSvc),
 		MetaHandler:      handler.NewMetaHandler(wallpaperSvc),
 		UploadHandler:    handler.NewUploadHandler(uploadSvc),
 		WallpaperHandler: handler.NewWallpaperHandler(wallpaperSvc),
 	})
 
 	return &App{
-		Logger: logger,
-		DB:     db,
-		Redis:  rdb,
-		Router: router,
+		Logger:      logger,
+		DB:          db,
+		Redis:       rdb,
+		MQConn:      mqConn,
+		MQPublisher: mqPublisher,
+		OutboxRelay: outboxRelay,
+		Router:      router,
 	}, nil
 }
 
-// Close 优雅释放 Redis 与 MySQL 连接池资源。
+// Close 按依赖逆序优雅释放 RabbitMQ、Redis 与 MySQL 资源。
 func (a *App) Close() error {
 	var errs []error
+	if a.MQPublisher != nil {
+		if err := a.MQPublisher.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close mq publisher: %w", err))
+		}
+	}
+	if a.MQConn != nil {
+		if err := a.MQConn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close mq connection: %w", err))
+		}
+	}
 	if a.Redis != nil {
 		if err := a.Redis.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close redis: %w", err))

@@ -21,6 +21,7 @@ const (
 	httpWriteTimeout      = 15 * time.Second
 	httpIdleTimeout       = 60 * time.Second
 	httpShutdownTimeout   = 10 * time.Second
+	relayShutdownTimeout  = 10 * time.Second
 )
 
 func main() {
@@ -41,6 +42,35 @@ func main() {
 	if err != nil {
 		slog.Error("initialize application failed", slog.Any("err", err))
 		os.Exit(1)
+	}
+
+	var (
+		relayCancel context.CancelFunc
+		relayDone   chan struct{}
+	)
+	if application.OutboxRelay != nil {
+		var relayCtx context.Context
+		relayCtx, relayCancel = context.WithCancel(context.Background())
+		relayDone = make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			application.Logger.Info("outbox relay started")
+			application.OutboxRelay.Run(relayCtx)
+		}()
+	}
+
+	stopRelay := func() {
+		if relayCancel == nil {
+			return
+		}
+		relayCancel()
+		timer := time.NewTimer(relayShutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-relayDone:
+		case <-timer.C:
+			application.Logger.Warn("outbox relay drain timed out", slog.Duration("timeout", relayShutdownTimeout))
+		}
 	}
 
 	srv := &http.Server{
@@ -70,6 +100,7 @@ func main() {
 	case err := <-errCh:
 		if err != nil {
 			application.Logger.Error("http server exited unexpectedly", slog.Any("err", err))
+			stopRelay()
 			_ = application.Close()
 			os.Exit(1)
 		}
@@ -78,9 +109,11 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer cancel()
 
+	// 严格按序排空：先停 HTTP 接收新请求 -> 再停并排空 OutboxRelay -> 最后释放 MQ/Redis/MySQL。
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		application.Logger.Error("http server graceful shutdown failed", slog.Any("err", err))
 	}
+	stopRelay()
 	if err := application.Close(); err != nil {
 		application.Logger.Error("close application resources failed", slog.Any("err", err))
 	}

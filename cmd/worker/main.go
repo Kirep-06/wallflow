@@ -8,10 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"wallpaper-feed/internal/app"
 	"wallpaper-feed/internal/cache"
 	"wallpaper-feed/internal/config"
 	"wallpaper-feed/internal/infra"
+	"wallpaper-feed/internal/mq"
 	"wallpaper-feed/internal/repository"
 	"wallpaper-feed/internal/worker"
 )
@@ -56,12 +59,67 @@ func main() {
 		}
 	}()
 
-	reconciler := worker.NewLatestFeedReconciler(
-		repository.NewWallpaperRepository(db),
-		cache.NewLatestFeed(rdb),
-	)
+	wallpaperRepo := repository.NewWallpaperRepository(db)
+	followRepo := repository.NewFollowRepository(db)
+	latestFeed := cache.NewLatestFeed(rdb)
+	bigVSet := cache.NewBigVSet(rdb, 0)
+	followingFeed := cache.NewFollowingFeed(rdb)
 
-	logger.Info("worker started", slog.String("env", cfg.Server.Env))
-	reconciler.Run(ctx)
+	latestReconciler := worker.NewLatestFeedReconciler(wallpaperRepo, latestFeed)
+	bigVReconciler := worker.NewBigVReconciler(followRepo, bigVSet)
+
+	var (
+		mqConn         *mq.ConnManager
+		retryPublisher *mq.ConfirmPublisher
+		fanoutConsumer *worker.FollowingFanoutConsumer
+	)
+	if cfg.RabbitMQ.Enabled {
+		mqConn = mq.NewConnManager(cfg.RabbitMQ)
+		retryPublisher = mq.NewConfirmPublisher(mqConn)
+		fanoutConsumer = worker.NewFollowingFanoutConsumer(
+			mqConn,
+			retryPublisher,
+			wallpaperRepo,
+			followRepo,
+			followingFeed,
+		)
+	} else {
+		logger.Info("rabbitmq disabled, following fanout consumer skipped")
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		latestReconciler.Run(gctx)
+		return nil
+	})
+	g.Go(func() error {
+		bigVReconciler.Run(gctx)
+		return nil
+	})
+	if fanoutConsumer != nil {
+		g.Go(func() error {
+			return fanoutConsumer.Run(gctx)
+		})
+	}
+
+	logger.Info("worker started",
+		slog.String("env", cfg.Server.Env),
+		slog.Bool("rabbitmq_enabled", cfg.RabbitMQ.Enabled),
+	)
+	if err := g.Wait(); err != nil {
+		logger.Error("worker task exited with error", slog.Any("err", err))
+	}
+
+	// 任务全部优雅排空退出后，再逆序释放 RabbitMQ 连接（defer 继续释放 Redis 与 MySQL）。
+	if retryPublisher != nil {
+		if err := retryPublisher.Close(); err != nil {
+			logger.Error("close mq retry publisher failed", slog.Any("err", err))
+		}
+	}
+	if mqConn != nil {
+		if err := mqConn.Close(); err != nil {
+			logger.Error("close mq connection failed", slog.Any("err", err))
+		}
+	}
 	logger.Info("shutdown signal received, worker stopped")
 }
