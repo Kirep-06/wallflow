@@ -15,12 +15,13 @@ type RouterDeps struct {
 	AuthService      *service.AuthService
 	AuthHandler      *AuthHandler
 	UserHandler      *UserHandler
+	FollowHandler    *FollowHandler
 	MetaHandler      *MetaHandler
 	UploadHandler    *UploadHandler
 	WallpaperHandler *WallpaperHandler
 }
 
-// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2 + M3）。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2 + M3 + M4）。
 func NewRouter(deps RouterDeps) *gin.Engine {
 	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
@@ -63,6 +64,10 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.PATCH("/me", authRequired, deps.UserHandler.PatchMe)
 			users.GET("/:id", authOptional, deps.UserHandler.GetPublicProfile)
 			users.GET("/:id/wallpapers", authOptional, deps.WallpaperHandler.ListUserWallpapers)
+			users.POST("/:id/follow", authRequired, deps.FollowHandler.Follow)
+			users.DELETE("/:id/follow", authRequired, deps.FollowHandler.Unfollow)
+			users.GET("/:id/following", authOptional, deps.FollowHandler.ListFollowing)
+			users.GET("/:id/followers", authOptional, deps.FollowHandler.ListFollowers)
 		}
 
 		// M2 + M3: 分类、标签、直传凭证与壁纸画廊/投稿管理

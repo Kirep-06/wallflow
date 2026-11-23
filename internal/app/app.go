@@ -121,12 +121,14 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
 	uploadSvc := service.NewUploadService(store)
 	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, wallpaperCache, latestFeed, store)
+	followSvc := service.NewFollowService(followRepo, userSvc, followStatsCache, followingIDsCache)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		IsDev:            cfg.IsDev(),
 		AuthService:      authSvc,
 		AuthHandler:      handler.NewAuthHandler(authSvc),
 		UserHandler:      handler.NewUserHandler(userSvc),
+		FollowHandler:    handler.NewFollowHandler(followSvc),
 		MetaHandler:      handler.NewMetaHandler(wallpaperSvc),
 		UploadHandler:    handler.NewUploadHandler(uploadSvc),
 		WallpaperHandler: handler.NewWallpaperHandler(wallpaperSvc),
