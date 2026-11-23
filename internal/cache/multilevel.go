@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strconv"
 	"time"
 
 	"github.com/Kirep-06/gocache"
@@ -17,6 +18,8 @@ import (
 const (
 	// NilMarker 为防缓存穿透写入 L1/L2 的空值哨兵标记。
 	NilMarker = "\x00nil"
+
+	wallpaperStatsKeyPrefix = "wallpaper:stats:"
 
 	defaultL1TTL  = 30 * time.Second
 	defaultL2TTL  = 1800 * time.Second
@@ -440,6 +443,11 @@ func applyJitter(base time.Duration) time.Duration {
 	}
 	factor := 1 + (rand.Float64()*2-1)*jitterRatio
 	return max(time.Duration(float64(base)*factor), time.Millisecond)
+}
+
+// WallpaperStatsKey 返回壁纸互动计数三级缓存的统一 Key（供 API 读写与 Worker 批量 UNLINK 共享）。
+func WallpaperStatsKey(wallpaperID uint64) string {
+	return wallpaperStatsKeyPrefix + strconv.FormatUint(wallpaperID, 10)
 }
 
 func ttlToSeconds(d time.Duration) int {

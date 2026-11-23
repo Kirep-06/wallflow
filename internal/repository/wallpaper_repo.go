@@ -288,6 +288,24 @@ func (r *WallpaperRepository) ListLatestIDs(ctx context.Context, beforeID uint64
 	return listWallpaperIDs(q, "id", beforeID, limit, "list latest ids")
 }
 
+// ListActiveIDsAfter 命中覆盖索引 idx_status_id 升序游标扫描正常壁纸 ID（供 M6 低频对账滚动扫描）。
+func (r *WallpaperRepository) ListActiveIDsAfter(ctx context.Context, afterID uint64, limit int) ([]uint64, error) {
+	if limit <= 0 {
+		return []uint64{}, nil
+	}
+	q := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()).
+		Where("status = ?", model.WallpaperStatusActive)
+	if afterID > 0 {
+		q = q.Where("id > ?", afterID)
+	}
+	ids := make([]uint64, 0, limit)
+	if err := q.Select("id").Order("id ASC").Limit(limit).Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("wallpaper repo list active ids after: %w", err)
+	}
+	return ids, nil
+}
+
 // ListCategoryWallpaperIDs 命中覆盖索引 idx_status_category_id 倒序游标查询指定分类下的正常壁纸 ID。
 func (r *WallpaperRepository) ListCategoryWallpaperIDs(ctx context.Context, categoryID, beforeID uint64, limit int) ([]uint64, error) {
 	q := r.db.WithContext(ctx).
