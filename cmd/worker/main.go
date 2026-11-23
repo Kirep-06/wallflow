@@ -61,22 +61,26 @@ func main() {
 
 	wallpaperRepo := repository.NewWallpaperRepository(db)
 	followRepo := repository.NewFollowRepository(db)
+	interactionRepo := repository.NewInteractionRepository(db)
 	latestFeed := cache.NewLatestFeed(rdb)
 	bigVSet := cache.NewBigVSet(rdb, 0)
 	followingFeed := cache.NewFollowingFeed(rdb)
 
 	latestReconciler := worker.NewLatestFeedReconciler(wallpaperRepo, latestFeed)
 	bigVReconciler := worker.NewBigVReconciler(followRepo, bigVSet)
+	statsReconciler := worker.NewStatsReconciler(wallpaperRepo, interactionRepo, rdb)
 
 	var (
-		mqClient       *mq.Client
-		fanoutConsumer *worker.FollowingFanoutConsumer
+		mqClient            *mq.Client
+		fanoutConsumer      *worker.FollowingFanoutConsumer
+		interactionConsumer *worker.InteractionAggConsumer
 	)
 	if cfg.RabbitMQ.Enabled {
 		mqClient = mq.NewClient(cfg.RabbitMQ)
 		fanoutConsumer = worker.NewFollowingFanoutConsumer(wallpaperRepo, followRepo, followingFeed)
+		interactionConsumer = worker.NewInteractionAggConsumer(interactionRepo, rdb)
 	} else {
-		logger.Info("rabbitmq disabled, following fanout consumer skipped")
+		logger.Info("rabbitmq disabled, mq consumers skipped")
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -88,9 +92,18 @@ func main() {
 		bigVReconciler.Run(gctx)
 		return nil
 	})
+	g.Go(func() error {
+		statsReconciler.Run(gctx)
+		return nil
+	})
 	if fanoutConsumer != nil {
 		g.Go(func() error {
 			return fanoutConsumer.Run(gctx, mqClient)
+		})
+	}
+	if interactionConsumer != nil {
+		g.Go(func() error {
+			return interactionConsumer.Run(gctx, mqClient)
 		})
 	}
 
