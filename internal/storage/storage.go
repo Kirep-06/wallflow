@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,7 +30,6 @@ const (
 	imageInfoTimeout  = 5 * time.Second
 	maxImageInfoBytes = 8192
 	qiniuThumbQuery   = "imageView2/2/w/800/format/webp/q/80"
-	allowedMimeLimit  = "image/jpeg;image/png;image/webp"
 )
 
 var (
@@ -48,6 +48,12 @@ var (
 		"image/jpeg": "jpg",
 		"image/png":  "png",
 		"image/webp": "webp",
+	}
+
+	extToContentType = map[string]string{
+		".jpg":  "image/jpeg",
+		".png":  "image/png",
+		".webp": "image/webp",
 	}
 
 	imageInfoFormatToMime = map[string]string{
@@ -110,6 +116,12 @@ func MaxBytesForScene(scene UploadScene) (int64, bool) {
 func ExtForContentType(contentType string) (string, bool) {
 	ext, ok := contentTypeToExt[strings.ToLower(strings.TrimSpace(contentType))]
 	return ext, ok
+}
+
+// MimeFromObjectKey 根据受控对象键扩展名推导对应的白名单 MIME 类型。
+func MimeFromObjectKey(objectKey string) (string, bool) {
+	mime, ok := extToContentType[strings.ToLower(path.Ext(strings.TrimSpace(objectKey)))]
+	return mime, ok
 }
 
 // ValidateObjectKey 校验对象键长度、路径安全性以及与场景和用户的严格归属关系。

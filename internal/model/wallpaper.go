@@ -57,27 +57,21 @@ func (t *Tag) ToItem() TagItem {
 	}
 }
 
-// Wallpaper 对应 MySQL wallpapers 表实体。
+// Wallpaper 对应 MySQL wallpapers 静态主表实体（高频互动计数由 M6 wallpaper_stats 独立承载）。
 type Wallpaper struct {
-	ID            uint64    `gorm:"primaryKey;autoIncrement"`
-	UserID        uint64    `gorm:"not null"`
-	CategoryID    uint64    `gorm:"not null"`
-	Title         string    `gorm:"type:varchar(80);not null"`
-	Description   string    `gorm:"type:varchar(500);not null;default:''"`
-	ObjectKey     string    `gorm:"type:varchar(255);not null;uniqueIndex:uk_object_key"`
-	Width         uint32    `gorm:"not null"`
-	Height        uint32    `gorm:"not null"`
-	Orientation   uint8     `gorm:"not null"`
-	Is4K          uint8     `gorm:"column:is_4k;not null;default:0"`
-	SizeBytes     uint64    `gorm:"not null"`
-	Mime          string    `gorm:"type:varchar(32);not null"`
-	LikeCount     uint64    `gorm:"not null;default:0"`
-	FavCount      uint64    `gorm:"not null;default:0"`
-	DownloadCount uint64    `gorm:"not null;default:0"`
-	CommentCount  uint64    `gorm:"not null;default:0"`
-	Status        uint8     `gorm:"not null;default:1"`
-	CreatedAt     time.Time `gorm:"autoCreateTime"`
-	UpdatedAt     time.Time `gorm:"autoUpdateTime"`
+	ID          uint64    `gorm:"primaryKey;autoIncrement"`
+	UserID      uint64    `gorm:"not null"`
+	CategoryID  uint64    `gorm:"not null"`
+	Title       string    `gorm:"type:varchar(80);not null"`
+	Description string    `gorm:"type:varchar(500);not null;default:''"`
+	ObjectKey   string    `gorm:"type:varchar(255);not null;uniqueIndex:uk_object_key"`
+	Width       uint32    `gorm:"not null"`
+	Height      uint32    `gorm:"not null"`
+	Orientation uint8     `gorm:"not null"`
+	Is4K        uint8     `gorm:"column:is_4k;not null;default:0"`
+	SizeBytes   uint64    `gorm:"not null"`
+	Status      uint8     `gorm:"not null;default:1"`
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
 }
 
 // TableName 指定 GORM 表名。

@@ -109,7 +109,9 @@ func TestUploadServiceCreateUploadToken(t *testing.T) {
 }
 
 func TestVerifyWallpaperObject(t *testing.T) {
-	validKey := "wallpapers/10001/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp"
+	validWebpKey := "wallpapers/10001/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp"
+	validJpgKey := "wallpapers/10001/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.jpg"
+	validPngKey := "wallpapers/10001/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.png"
 
 	tests := []struct {
 		name    string
@@ -118,18 +120,19 @@ func TestVerifyWallpaperObject(t *testing.T) {
 		inspect error
 		wantErr error
 	}{
-		{name: "valid 4k", key: validKey, meta: &storage.ImageMeta{SizeBytes: 2 << 20, MimeType: "image/webp", Width: 3840, Height: 2160}},
-		{name: "valid min boundary", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1, MimeType: "image/jpeg", Width: 1280, Height: 480}},
-		{name: "valid portrait max aspect 4.0", key: validKey, meta: &storage.ImageMeta{SizeBytes: storage.WallpaperMaxBytes, MimeType: "image/png", Width: 500, Height: 2000}},
+		{name: "valid 4k", key: validWebpKey, meta: &storage.ImageMeta{SizeBytes: 2 << 20, MimeType: "image/webp", Width: 3840, Height: 2160}},
+		{name: "valid min boundary", key: validJpgKey, meta: &storage.ImageMeta{SizeBytes: 1, MimeType: "image/jpeg", Width: 1280, Height: 480}},
+		{name: "valid portrait max aspect 4.0", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: storage.WallpaperMaxBytes, MimeType: "image/png", Width: 500, Height: 2000}},
 		{name: "wrong owner returns 10002", key: "wallpapers/999/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp", wantErr: errno.ErrInvalidParam},
-		{name: "404 returns 30001", key: validKey, inspect: storage.ErrObjectNotFound, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "invalid image returns 30001", key: validKey, inspect: storage.ErrInvalidImage, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "upstream 5xx returns 10001", key: validKey, inspect: errors.New("502 bad gateway"), wantErr: errno.ErrInternal},
-		{name: "noop disabled returns 10001", key: validKey, inspect: storage.ErrStorageDisabled, wantErr: errno.ErrInternal},
-		{name: "size over 20MiB returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: storage.WallpaperMaxBytes + 1, MimeType: "image/png", Width: 1920, Height: 1080}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "long edge below 1280 returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 1279, Height: 720}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "short edge below 480 returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 1920, Height: 479}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "aspect ratio over 4.0 returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 2001, Height: 500}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "404 returns 30001", key: validWebpKey, inspect: storage.ErrObjectNotFound, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "invalid image returns 30001", key: validWebpKey, inspect: storage.ErrInvalidImage, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "upstream 5xx returns 10001", key: validWebpKey, inspect: errors.New("502 bad gateway"), wantErr: errno.ErrInternal},
+		{name: "noop disabled returns 10001", key: validWebpKey, inspect: storage.ErrStorageDisabled, wantErr: errno.ErrInternal},
+		{name: "size over 20MiB returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: storage.WallpaperMaxBytes + 1, MimeType: "image/png", Width: 1920, Height: 1080}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "mime mismatch with key extension returns 30001", key: validWebpKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 1920, Height: 1080}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "long edge below 1280 returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 1279, Height: 720}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "short edge below 480 returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 1920, Height: 479}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "aspect ratio over 4.0 returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 2001, Height: 500}, wantErr: errno.ErrUploadVerifyFailed},
 	}
 
 	for _, tc := range tests {
@@ -154,7 +157,8 @@ func TestVerifyWallpaperObject(t *testing.T) {
 }
 
 func TestVerifyAvatarObject(t *testing.T) {
-	validKey := "avatars/42/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.png"
+	validPngKey := "avatars/42/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.png"
+	validJpgKey := "avatars/42/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.jpg"
 
 	tests := []struct {
 		name    string
@@ -163,14 +167,15 @@ func TestVerifyAvatarObject(t *testing.T) {
 		inspect error
 		wantErr error
 	}{
-		{name: "valid min 100x100", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 100, Height: 100}},
-		{name: "valid max 4096x4096", key: validKey, meta: &storage.ImageMeta{SizeBytes: storage.AvatarMaxBytes, MimeType: "image/jpeg", Width: 4096, Height: 4096}},
+		{name: "valid min 100x100", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 100, Height: 100}},
+		{name: "valid max 4096x4096", key: validJpgKey, meta: &storage.ImageMeta{SizeBytes: storage.AvatarMaxBytes, MimeType: "image/jpeg", Width: 4096, Height: 4096}},
 		{name: "loose m1 avatar key rejected with 10002", key: "avatars/42/my-avatar.png", wantErr: errno.ErrInvalidParam},
-		{name: "size over 5MiB returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: storage.AvatarMaxBytes + 1, MimeType: "image/png", Width: 512, Height: 512}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "width below 100 returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 99, Height: 200}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "height above 4096 returns 30001", key: validKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 512, Height: 4097}, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "missing object returns 30001", key: validKey, inspect: storage.ErrObjectNotFound, wantErr: errno.ErrUploadVerifyFailed},
-		{name: "upstream error returns 10001", key: validKey, inspect: errors.New("timeout"), wantErr: errno.ErrInternal},
+		{name: "mime mismatch with key extension returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/jpeg", Width: 512, Height: 512}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "size over 5MiB returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: storage.AvatarMaxBytes + 1, MimeType: "image/png", Width: 512, Height: 512}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "width below 100 returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 99, Height: 200}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "height above 4096 returns 30001", key: validPngKey, meta: &storage.ImageMeta{SizeBytes: 1024, MimeType: "image/png", Width: 512, Height: 4097}, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "missing object returns 30001", key: validPngKey, inspect: storage.ErrObjectNotFound, wantErr: errno.ErrUploadVerifyFailed},
+		{name: "upstream error returns 10001", key: validPngKey, inspect: errors.New("timeout"), wantErr: errno.ErrInternal},
 	}
 
 	for _, tc := range tests {

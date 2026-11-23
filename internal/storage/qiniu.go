@@ -59,13 +59,14 @@ func NewQiniuStorage(cfg config.StorageConfig) (*QiniuStorage, error) {
 	}, nil
 }
 
-// GenerateUploadToken 签发锁定唯一 object_key、InsertOnly、体积与 MIME 白名单的七牛直传凭证。
+// GenerateUploadToken 签发锁定唯一 object_key、InsertOnly、体积与对应单 MIME 的七牛直传凭证。
 func (s *QiniuStorage) GenerateUploadToken(_ context.Context, userID uint64, scene UploadScene, contentType string) (*UploadCredential, error) {
 	maxBytes, ok := MaxBytesForScene(scene)
 	if !ok {
 		return nil, fmt.Errorf("storage: unsupported upload scene %q", scene)
 	}
-	ext, ok := ExtForContentType(contentType)
+	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
+	ext, ok := ExtForContentType(normalizedType)
 	if !ok {
 		return nil, fmt.Errorf("storage: unsupported content type %q", contentType)
 	}
@@ -80,7 +81,7 @@ func (s *QiniuStorage) GenerateUploadToken(_ context.Context, userID uint64, sce
 		InsertOnly: 1,
 		FsizeMin:   1,
 		FsizeLimit: maxBytes,
-		MimeLimit:  allowedMimeLimit,
+		MimeLimit:  normalizedType,
 		Expires:    expiresSec,
 	}
 

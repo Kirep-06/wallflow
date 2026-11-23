@@ -46,6 +46,28 @@ func TestValidateObjectKey(t *testing.T) {
 	}
 }
 
+func TestMimeFromObjectKey(t *testing.T) {
+	tests := []struct {
+		key      string
+		wantMime string
+		wantOK   bool
+	}{
+		{key: "wallpapers/1/20261122/abc.jpg", wantMime: "image/jpeg", wantOK: true},
+		{key: "wallpapers/1/20261122/abc.png", wantMime: "image/png", wantOK: true},
+		{key: "wallpapers/1/20261122/abc.webp", wantMime: "image/webp", wantOK: true},
+		{key: "wallpapers/1/20261122/abc.gif", wantMime: "", wantOK: false},
+		{key: "wallpapers/1/20261122/noext", wantMime: "", wantOK: false},
+		{key: "", wantMime: "", wantOK: false},
+	}
+
+	for _, tc := range tests {
+		got, ok := MimeFromObjectKey(tc.key)
+		if got != tc.wantMime || ok != tc.wantOK {
+			t.Fatalf("MimeFromObjectKey(%q) = (%q, %v), want (%q, %v)", tc.key, got, ok, tc.wantMime, tc.wantOK)
+		}
+	}
+}
+
 func TestZoneMappingAndURLs(t *testing.T) {
 	zones := map[string]string{
 		"z0":        "https://upload.qiniup.com",
@@ -162,8 +184,8 @@ func TestQiniuPutPolicy(t *testing.T) {
 	if decoded.InsertOnly != 1 || decoded.FsizeMin != 1 || decoded.FsizeLimit != AvatarMaxBytes {
 		t.Fatalf("unexpected policy limits: %+v", decoded)
 	}
-	if decoded.MimeLimit != allowedMimeLimit {
-		t.Fatalf("mimeLimit = %q, want %q", decoded.MimeLimit, allowedMimeLimit)
+	if decoded.MimeLimit != "image/jpeg" {
+		t.Fatalf("mimeLimit = %q, want %q", decoded.MimeLimit, "image/jpeg")
 	}
 	if decoded.Deadline < before+600 || decoded.Deadline > after+600 {
 		t.Fatalf("deadline = %d, expected around %d..%d", decoded.Deadline, before+600, after+600)

@@ -143,7 +143,6 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		Orientation: orientation,
 		Is4K:        is4KFlag,
 		SizeBytes:   uint64(meta.SizeBytes),
-		Mime:        meta.MimeType,
 		Status:      model.WallpaperStatusActive,
 	}
 	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames)
@@ -175,11 +174,11 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		Orientation:   wp.Orientation,
 		Is4K:          is4K,
 		SizeBytes:     wp.SizeBytes,
-		Mime:          wp.Mime,
-		LikeCount:     wp.LikeCount,
-		FavCount:      wp.FavCount,
-		DownloadCount: wp.DownloadCount,
-		CommentCount:  wp.CommentCount,
+		Mime:          meta.MimeType,
+		LikeCount:     0, // M6 由 wallpaper_stats 承载，新发布恒为 0
+		FavCount:      0,
+		DownloadCount: 0,
+		CommentCount:  0,
 		Category:      category.ToItem(),
 		Tags:          tagItems,
 		Author:        author,

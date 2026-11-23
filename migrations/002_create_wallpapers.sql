@@ -25,26 +25,20 @@ CREATE TABLE IF NOT EXISTS wallpapers (
     category_id    BIGINT UNSIGNED  NOT NULL                COMMENT '所属分类 ID',
     title          VARCHAR(80)      NOT NULL                COMMENT '壁纸标题',
     description    VARCHAR(500)     NOT NULL DEFAULT ''     COMMENT '壁纸简介',
-    object_key     VARCHAR(255)     NOT NULL                COMMENT '对象存储相对 key（不含域名）',
+    object_key     VARCHAR(255)     NOT NULL                COMMENT '对象存储相对 key（不含域名，扩展名严格绑定真实格式）',
     width          INT UNSIGNED     NOT NULL                COMMENT '原图宽度(px)',
     height         INT UNSIGNED     NOT NULL                COMMENT '原图高度(px)',
     orientation    TINYINT UNSIGNED NOT NULL                COMMENT '1-横屏 2-竖屏 3-方图',
     is_4k          TINYINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '0-否 1-是',
     size_bytes     BIGINT UNSIGNED  NOT NULL                COMMENT '文件字节大小',
-    mime           VARCHAR(32)      NOT NULL                COMMENT 'MIME 类型',
-    like_count     BIGINT UNSIGNED  NOT NULL DEFAULT 0      COMMENT '点赞数（M6）',
-    fav_count      BIGINT UNSIGNED  NOT NULL DEFAULT 0      COMMENT '收藏数（M6）',
-    download_count BIGINT UNSIGNED  NOT NULL DEFAULT 0      COMMENT '下载数（M6）',
-    comment_count  BIGINT UNSIGNED  NOT NULL DEFAULT 0      COMMENT '评论数（M6）',
     status         TINYINT UNSIGNED NOT NULL DEFAULT 1      COMMENT '1-正常 2-已删除',
     created_at     DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    updated_at     DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
     UNIQUE KEY uk_object_key (object_key),
     KEY idx_status_id (status, id),
     KEY idx_user_status_id (user_id, status, id),
     KEY idx_filter (status, category_id, orientation, is_4k, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='壁纸主表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='壁纸静态主表';
 
 CREATE TABLE IF NOT EXISTS wallpaper_tags (
     wallpaper_id BIGINT UNSIGNED NOT NULL COMMENT '壁纸 ID',

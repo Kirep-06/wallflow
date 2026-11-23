@@ -82,6 +82,9 @@ func verifyUploadedImage(
 	if meta == nil || meta.SizeBytes < 1 || meta.SizeBytes > maxBytes {
 		return nil, errno.ErrUploadVerifyFailed.WithMessage("上传文件大小超出限制")
 	}
+	if expectedMime, ok := storage.MimeFromObjectKey(objectKey); !ok || meta.MimeType != expectedMime {
+		return nil, errno.ErrUploadVerifyFailed.WithMessage("上传文件实际格式与对象后缀不匹配")
+	}
 	return meta, nil
 }
 
