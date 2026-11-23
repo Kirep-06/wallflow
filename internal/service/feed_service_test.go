@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -250,5 +252,197 @@ func TestFeedServiceValidationEmptyAndReadTimeUnfollowFilter(t *testing.T) {
 	}
 	if page.Items[0].ID != 103 || page.Items[1].ID != 101 {
 		t.Fatalf("unexpected item order/ids: %+v", page.Items)
+	}
+}
+
+func TestFeedService_ListHotFeed_RedisETagPaginationAndRemoveBust(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	l1 := gocache.NewCache(2 * 1024 * 1024)
+	profileCache := cache.NewMultiLevel[model.UserProfileCache](l1, rdb, 30*time.Second, 30*time.Minute)
+	wallpaperCache := cache.NewMultiLevel[model.WallpaperDetailCache](l1, rdb, 30*time.Second, 10*time.Minute)
+	statsCache := cache.NewMultiLevel[model.WallpaperStatsCache](l1, rdb, 10*time.Second, 10*time.Minute)
+	hotRank := cache.NewHotRank(rdb)
+
+	store := &stubStorage{}
+	userSvc := NewUserService(UserServiceDeps{
+		ProfileCache: profileCache,
+		Store:        store,
+	})
+	wpSvc := NewWallpaperService(
+		nil, nil, userSvc, wallpaperCache, nil, store,
+		WithWallpaperInteraction(nil, statsCache),
+		WithWallpaperHotRank(hotRank),
+	)
+	feedSvc := NewFeedService(FeedServiceDeps{
+		HotRank:      hotRank,
+		WallpaperSvc: wpSvc,
+	})
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 预热作者、壁纸详情与统计缓存，包含同分 ID=10 与 ID=9 验证字典序防错乱。
+	rawAuthor, _ := json.Marshal(model.UserProfileCache{ID: 7, Username: "artist7", Nickname: "画师7"})
+	_ = rdb.Set(ctx, userProfileKey(7), rawAuthor, time.Minute).Err()
+	for _, id := range []uint64{100, 10, 9, 8} {
+		rawWP, _ := json.Marshal(model.WallpaperDetailCache{
+			ID: id, UserID: 7, Title: "热门图", ObjectKey: "wallpapers/7/img.jpg", CreatedAt: now,
+		})
+		_ = rdb.Set(ctx, wallpaperDetailKey(id), rawWP, time.Minute).Err()
+		rawStats, _ := json.Marshal(model.WallpaperStatsCache{LikeCount: id, DownloadCount: id * 2})
+		_ = rdb.Set(ctx, cache.WallpaperStatsKey(id), rawStats, time.Minute).Err()
+	}
+
+	ver, err := hotRank.Swap(ctx, []model.HotRankEntry{
+		{WallpaperID: 100, Score: 10.0},
+		{WallpaperID: 9, Score: 4.5},
+		{WallpaperID: 10, Score: 4.5},
+		{WallpaperID: 8, Score: 2.0},
+	})
+	if err != nil {
+		t.Fatalf("hotRank.Swap failed: %v", err)
+	}
+
+	// 1. 非法 ScoreCursor（score<=0 / id=0 / 垃圾串）统一返回 50001
+	zeroScoreCur, _ := cursor.Encode(cursor.ScoreCursor{Score: 0, ID: 10})
+	negScoreCur, _ := cursor.Encode(cursor.ScoreCursor{Score: -1.5, ID: 10})
+	zeroIDCur, _ := cursor.Encode(cursor.ScoreCursor{Score: 4.5, ID: 0})
+	for _, bad := range []string{"bad-cursor", zeroScoreCur, negScoreCur, zeroIDCur} {
+		if _, err := feedSvc.ListHotFeed(ctx, 0, bad, 20, ""); !errors.Is(err, cursor.ErrInvalid) {
+			t.Fatalf("cursor %q: expected ErrInvalidCursor, got %v", bad, err)
+		}
+	}
+
+	// 2. 游客首屏返回 200 + 弱 ETag，排序严格按 (score DESC, id DESC) -> [100, 10]
+	p1, err := feedSvc.ListHotFeed(ctx, 0, "", 2, "")
+	if err != nil {
+		t.Fatalf("first page failed: %v", err)
+	}
+	wantETag := `W/"hot-` + ver + `-l2-u0"`
+	if p1.NotModified || p1.ETag != wantETag {
+		t.Fatalf("p1 ETag=%q NotModified=%v, want %q false", p1.ETag, p1.NotModified, wantETag)
+	}
+	if len(p1.Page.Items) != 2 || p1.Page.Items[0].ID != 100 || p1.Page.Items[1].ID != 10 || !p1.Page.HasMore {
+		t.Fatalf("unexpected p1 items: %+v", p1.Page)
+	}
+
+	// 3. 游客携带相同 ETag（单值与多值列表）均命中 304，不装配 Page
+	hitSingle, err := feedSvc.ListHotFeed(ctx, 0, "", 2, wantETag)
+	if err != nil || !hitSingle.NotModified || hitSingle.Page != nil || hitSingle.ETag != wantETag {
+		t.Fatalf("expected 304 single hit, got %+v err=%v", hitSingle, err)
+	}
+	hitMulti, err := feedSvc.ListHotFeed(ctx, 0, "", 2, `W/"hot-1-l2-u0", `+wantETag)
+	if err != nil || !hitMulti.NotModified || hitMulti.Page != nil {
+		t.Fatalf("expected 304 multi hit, got %+v err=%v", hitMulti, err)
+	}
+
+	// 4. 登录态切换（viewerID=42 带着游客 u0 ETag）或换 limit 绝不误命中 304
+	authRes, err := feedSvc.ListHotFeed(ctx, 42, "", 2, wantETag)
+	if err != nil || authRes.NotModified || authRes.ETag != `W/"hot-`+ver+`-l2-u42"` {
+		t.Fatalf("auth switch must miss 304 and issue u42 ETag, got %+v err=%v", authRes, err)
+	}
+	limitRes, err := feedSvc.ListHotFeed(ctx, 0, "", 3, wantETag)
+	if err != nil || limitRes.NotModified || limitRes.ETag != `W/"hot-`+ver+`-l3-u0"` {
+		t.Fatalf("limit switch must miss 304 and issue l3 ETag, got %+v err=%v", limitRes, err)
+	}
+
+	// 5. 翻第 2 页携带 ScoreCursor（即使带了 If-None-Match 也不返 304 且不发 ETag），正确产出同分后续 [9, 8]
+	p2, err := feedSvc.ListHotFeed(ctx, 0, p1.Page.NextCursor, 2, wantETag)
+	if err != nil {
+		t.Fatalf("page 2 failed: %v", err)
+	}
+	if p2.NotModified || p2.ETag != "" || p2.Page.HasMore || p2.Page.NextCursor != "" {
+		t.Fatalf("unexpected page 2 meta: %+v", p2)
+	}
+	if len(p2.Page.Items) != 2 || p2.Page.Items[0].ID != 9 || p2.Page.Items[1].ID != 8 {
+		t.Fatalf("unexpected page 2 items (tie-break): %+v", p2.Page.Items)
+	}
+
+	// 6. 软删榜首壁纸 #100 后，旧 ETag 立即失效不再返回 304，列表自动剔除 #100
+	if err := hotRank.Remove(ctx, 100); err != nil {
+		t.Fatalf("hotRank.Remove failed: %v", err)
+	}
+	afterDel, err := feedSvc.ListHotFeed(ctx, 0, "", 2, wantETag)
+	if err != nil || afterDel.NotModified || afterDel.ETag == wantETag {
+		t.Fatalf("expected ETag invalidated after remove, got %+v err=%v", afterDel, err)
+	}
+	if len(afterDel.Page.Items) != 2 || afterDel.Page.Items[0].ID != 10 || afterDel.Page.Items[1].ID != 9 {
+		t.Fatalf("unexpected items after remove: %+v", afterDel.Page.Items)
+	}
+}
+
+func TestFeedService_ListHotFeed_FallbackSingleflight(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	l1 := gocache.NewCache(2 * 1024 * 1024)
+	profileCache := cache.NewMultiLevel[model.UserProfileCache](l1, rdb, 30*time.Second, 30*time.Minute)
+	wallpaperCache := cache.NewMultiLevel[model.WallpaperDetailCache](l1, rdb, 30*time.Second, 10*time.Minute)
+	statsCache := cache.NewMultiLevel[model.WallpaperStatsCache](l1, rdb, 10*time.Second, 10*time.Minute)
+	hotRank := cache.NewHotRank(rdb) // 未 Swap，模拟未就绪/降级场景
+
+	store := &stubStorage{}
+	userSvc := NewUserService(UserServiceDeps{ProfileCache: profileCache, Store: store})
+	wpSvc := NewWallpaperService(nil, nil, userSvc, wallpaperCache, nil, store, WithWallpaperInteraction(nil, statsCache))
+	feedSvc := NewFeedService(FeedServiceDeps{HotRank: hotRank, WallpaperSvc: wpSvc})
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	rawAuthor, _ := json.Marshal(model.UserProfileCache{ID: 1, Username: "u1", Nickname: "U1"})
+	_ = rdb.Set(ctx, userProfileKey(1), rawAuthor, time.Minute).Err()
+	for _, id := range []uint64{1, 2} {
+		rawWP, _ := json.Marshal(model.WallpaperDetailCache{ID: id, UserID: 1, Title: "T", ObjectKey: "wallpapers/1/a.jpg", CreatedAt: now})
+		_ = rdb.Set(ctx, wallpaperDetailKey(id), rawWP, time.Minute).Err()
+		rawStats, _ := json.Marshal(model.WallpaperStatsCache{DownloadCount: id * 10})
+		_ = rdb.Set(ctx, cache.WallpaperStatsKey(id), rawStats, time.Minute).Err()
+	}
+
+	var dbCalls atomic.Int32
+	gate := make(chan struct{})
+	feedSvc.hotBatchLoader = func(_ context.Context, beforeID uint64, limit int) ([]model.HotRankCandidate, error) {
+		dbCalls.Add(1)
+		<-gate
+		if beforeID > 0 {
+			return nil, nil
+		}
+		return []model.HotRankCandidate{
+			{ID: 2, CreatedAt: now.Add(-time.Hour), DownloadCount: 20},
+			{ID: 1, CreatedAt: now.Add(-time.Hour), DownloadCount: 10},
+		}, nil
+	}
+
+	const concurrency = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := feedSvc.ListHotFeed(ctx, 0, "", 10, `W/"hot-1-l10-u0"`)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if res.NotModified || res.ETag != "" || len(res.Page.Items) != 2 || res.Page.Items[0].ID != 2 {
+				errs <- errors.New("unexpected fallback result")
+			}
+		}()
+	}
+
+	// 等待首个并发请求进入 singleflight 后统一放行
+	time.Sleep(30 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent fallback failed: %v", err)
+	}
+	if calls := dbCalls.Load(); calls != 1 {
+		t.Fatalf("expected singleflight coalesced into 1 DB call, got %d", calls)
 	}
 }
