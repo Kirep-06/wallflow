@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS wallpapers (
     UNIQUE KEY uk_object_key (object_key),
     KEY idx_status_id (status, id),
     KEY idx_user_status_id (user_id, status, id),
-    KEY idx_filter (status, category_id, orientation, is_4k, id)
+    KEY idx_status_category_id (status, category_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='壁纸静态主表';
 
 CREATE TABLE IF NOT EXISTS wallpaper_tags (
