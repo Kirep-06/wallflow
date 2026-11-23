@@ -54,6 +54,12 @@ var (
 	ErrInvalidCursor = &Error{Code: 50001, HTTPStatus: http.StatusBadRequest, Msg: "分页游标无效"}
 )
 
+// 6xxxx：互动体系错误码（M6）。
+var (
+	ErrCommentNotFound = &Error{Code: 60001, HTTPStatus: http.StatusNotFound, Msg: "评论不存在"}
+	ErrInvalidComment  = &Error{Code: 60002, HTTPStatus: http.StatusBadRequest, Msg: "评论内容不合法"}
+)
+
 func (e *Error) Error() string {
 	if e == nil {
 		return ""

@@ -44,6 +44,14 @@ type Delivery struct {
 // MessageHandler 为单条队列消息的业务处理回调。
 type MessageHandler func(ctx context.Context, d Delivery) error
 
+// StreamDelivery 为单流批量聚合消费的消息视图，保留手动 Ack/Nack 能力且脱耦底层连接便于离线单测。
+type StreamDelivery struct {
+	Body      []byte
+	MessageID string
+	Ack       func(multiple bool) error
+	Nack      func(multiple, requeue bool) error
+}
+
 // ConsumerOptions 配置消费队列、并发度与延迟重试路由键。
 type ConsumerOptions struct {
 	Queue           string
@@ -98,6 +106,132 @@ func (c *Client) Consume(ctx context.Context, opts ConsumerOptions, handler Mess
 		case <-timer.C:
 		}
 	}
+}
+
+// ConsumeStream 在 Client 上运行单消费者流式会话，内置断连重连、Qos 预取与停机 channel.Cancel 排空。
+// 原始通道关闭时 stream 随之关闭，待 sessionFn 完成最终同步 Flush 与批量 Ack 返回后再关闭 AMQP Channel。
+func (c *Client) ConsumeStream(
+	ctx context.Context,
+	queue, consumerTag string,
+	prefetch int,
+	sessionFn func(ctx context.Context, deliveries <-chan StreamDelivery) error,
+) error {
+	if c == nil {
+		return ErrNotConnected
+	}
+	if prefetch <= 0 {
+		prefetch = defaultConsumerPrefetch
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		conn, err := c.waitReady(ctx)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, ErrClosed) {
+				return nil
+			}
+			return err
+		}
+
+		if err := consumeStreamSession(ctx, conn, queue, consumerTag, prefetch, sessionFn); err != nil && ctx.Err() == nil {
+			slog.Warn("rabbitmq stream consumer session ended, waiting for reconnect",
+				slog.String("queue", queue),
+				slog.Any("err", err),
+			)
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		timer := time.NewTimer(consumerReconnectWait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func consumeStreamSession(
+	ctx context.Context,
+	conn *amqp.Connection,
+	queue, consumerTag string,
+	prefetch int,
+	sessionFn func(ctx context.Context, deliveries <-chan StreamDelivery) error,
+) error {
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("open stream consumer channel: %w", err)
+	}
+	if err := ch.Qos(prefetch, 0, false); err != nil {
+		_ = ch.Close()
+		return fmt.Errorf("set stream consumer qos: %w", err)
+	}
+
+	rawDeliveries, err := ch.Consume(queue, consumerTag, false, false, false, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		return fmt.Errorf("start stream consume %s: %w", queue, err)
+	}
+
+	slog.Info("rabbitmq stream consumer started",
+		slog.String("queue", queue),
+		slog.Int("prefetch", prefetch),
+	)
+
+	sessionDone := make(chan struct{})
+	cancelDone := make(chan struct{})
+	go func() {
+		defer close(cancelDone)
+		select {
+		case <-ctx.Done():
+			slog.Info("rabbitmq stream consumer draining in-flight deliveries", slog.String("queue", queue))
+			if cancelErr := ch.Cancel(consumerTag, false); cancelErr != nil && !errors.Is(cancelErr, amqp.ErrClosed) {
+				slog.Warn("rabbitmq stream consumer channel cancel failed",
+					slog.String("queue", queue),
+					slog.Any("err", cancelErr),
+				)
+			}
+		case <-sessionDone:
+		}
+	}()
+
+	stream := make(chan StreamDelivery)
+	bridgeStop := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	go func() {
+		defer close(bridgeDone)
+		defer close(stream)
+		for raw := range rawDeliveries {
+			d := raw
+			item := StreamDelivery{
+				Body:      d.Body,
+				MessageID: d.MessageId,
+				Ack:       d.Ack,
+				Nack:      d.Nack,
+			}
+			select {
+			case stream <- item:
+			case <-bridgeStop:
+				return
+			}
+		}
+	}()
+
+	sessionErr := sessionFn(ctx, stream)
+
+	close(sessionDone)
+	<-cancelDone
+	close(bridgeStop)
+	if !ch.IsClosed() {
+		_ = ch.Close()
+	}
+	<-bridgeDone
+	return sessionErr
 }
 
 func consumeSession(

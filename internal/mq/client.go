@@ -37,12 +37,25 @@ type PublishMessage struct {
 	Headers    amqp.Table
 }
 
-// Publisher 定义外部消息发布边界接口（隔离 amqp091-go 便于离线单测）。
+// Publisher 定义强可靠 Confirm 消息发布边界接口（隔离 amqp091-go 便于离线单测）。
 type Publisher interface {
 	Publish(ctx context.Context, msg PublishMessage) error
 }
 
-// Client 统一封装 Connection 级自动重连、幂等拓扑声明、并发安全 Confirm 发布与消息消费入口。
+// LightPublisher 定义高频削峰通道的轻量无 Confirm 发布边界接口。
+type LightPublisher interface {
+	PublishLight(ctx context.Context, msg PublishMessage) error
+}
+
+type pubChannelState struct {
+	confirm bool
+	mu      sync.Mutex
+	ch      *amqp.Channel
+	gen     uint64
+	closed  chan *amqp.Error
+}
+
+// Client 统一封装 Connection 级自动重连、幂等拓扑声明、Confirm/轻量双通道发布与消费入口。
 type Client struct {
 	cfg config.RabbitMQConfig
 
@@ -53,16 +66,17 @@ type Client struct {
 	readyClosed bool
 	closed      bool
 
-	pubMu     sync.Mutex
-	pubCh     *amqp.Channel
-	pubGen    uint64
-	pubClosed chan *amqp.Error
+	confirmPub pubChannelState
+	lightPub   pubChannelState
 
 	stopCancel context.CancelFunc
 	loopDone   chan struct{}
 }
 
-var _ Publisher = (*Client)(nil)
+var (
+	_ Publisher      = (*Client)(nil)
+	_ LightPublisher = (*Client)(nil)
+)
 
 // NewClient 启动 RabbitMQ 客户端；启动时 MQ 暂不可达仅记录告警并转入后台重连，不阻断进程启动。
 func NewClient(cfg config.RabbitMQConfig) *Client {
@@ -70,6 +84,7 @@ func NewClient(cfg config.RabbitMQConfig) *Client {
 	c := &Client{
 		cfg:        cfg,
 		readyCh:    make(chan struct{}),
+		confirmPub: pubChannelState{confirm: true},
 		stopCancel: cancel,
 		loopDone:   make(chan struct{}),
 	}
@@ -94,10 +109,10 @@ func (c *Client) Publish(ctx context.Context, msg PublishMessage) error {
 		return ErrNotConnected
 	}
 
-	c.pubMu.Lock()
-	defer c.pubMu.Unlock()
+	c.confirmPub.mu.Lock()
+	defer c.confirmPub.mu.Unlock()
 
-	ch, err := c.ensurePubChannelLocked()
+	ch, err := c.ensurePubChannelLocked(&c.confirmPub)
 	if err != nil {
 		return err
 	}
@@ -108,31 +123,45 @@ func (c *Client) Publish(ctx context.Context, msg PublishMessage) error {
 		msg.RoutingKey,
 		false,
 		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			MessageId:    msg.MessageID,
-			Headers:      msg.Headers,
-			Timestamp:    time.Now().UTC(),
-			Body:         msg.Body,
-		},
+		buildPublishing(msg),
 	)
 	if err != nil {
-		c.resetPubChannelLocked()
+		c.confirmPub.resetLocked()
 		return fmt.Errorf("mq publish: %w", err)
 	}
 	if confirm == nil {
-		c.resetPubChannelLocked()
+		c.confirmPub.resetLocked()
 		return errors.New("mq publish: nil deferred confirmation")
 	}
 
 	acked, err := confirm.WaitContext(ctx)
 	if err != nil {
-		c.resetPubChannelLocked()
+		c.confirmPub.resetLocked()
 		return fmt.Errorf("mq publish confirm wait: %w", err)
 	}
 	if !acked {
 		return ErrPublishNacked
+	}
+	return nil
+}
+
+// PublishLight 使用独立非 Confirm 通道异步直发削峰消息（无 Broker Confirm RTT，与 Confirm 通道互不阻塞）。
+func (c *Client) PublishLight(ctx context.Context, msg PublishMessage) error {
+	if c == nil {
+		return ErrNotConnected
+	}
+
+	c.lightPub.mu.Lock()
+	defer c.lightPub.mu.Unlock()
+
+	ch, err := c.ensurePubChannelLocked(&c.lightPub)
+	if err != nil {
+		return err
+	}
+
+	if err := ch.PublishWithContext(ctx, msg.Exchange, msg.RoutingKey, false, false, buildPublishing(msg)); err != nil {
+		c.lightPub.resetLocked()
+		return fmt.Errorf("mq publish light: %w", err)
 	}
 	return nil
 }
@@ -160,15 +189,12 @@ func (c *Client) Close() error {
 	<-c.loopDone
 
 	var errs []error
-	c.pubMu.Lock()
-	if c.pubCh != nil && !c.pubCh.IsClosed() {
-		if err := c.pubCh.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-			errs = append(errs, fmt.Errorf("mq close publish channel: %w", err))
-		}
+	if err := c.confirmPub.close(); err != nil {
+		errs = append(errs, fmt.Errorf("mq close confirm publish channel: %w", err))
 	}
-	c.pubCh = nil
-	c.pubClosed = nil
-	c.pubMu.Unlock()
+	if err := c.lightPub.close(); err != nil {
+		errs = append(errs, fmt.Errorf("mq close light publish channel: %w", err))
+	}
 
 	c.connMu.Lock()
 	conn := c.conn
@@ -219,45 +245,73 @@ func (c *Client) waitReady(ctx context.Context) (*amqp.Connection, error) {
 	}
 }
 
-func (c *Client) ensurePubChannelLocked() (*amqp.Channel, error) {
+func buildPublishing(msg PublishMessage) amqp.Publishing {
+	return amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		ContentType:  "application/json",
+		MessageId:    msg.MessageID,
+		Headers:      msg.Headers,
+		Timestamp:    time.Now().UTC(),
+		Body:         msg.Body,
+	}
+}
+
+func (c *Client) ensurePubChannelLocked(st *pubChannelState) (*amqp.Channel, error) {
 	conn, gen, err := c.currentConn()
 	if err != nil {
-		c.resetPubChannelLocked()
+		st.resetLocked()
 		return nil, err
 	}
 
-	if c.pubCh != nil && !c.pubCh.IsClosed() && c.pubGen == gen {
+	if st.ch != nil && !st.ch.IsClosed() && st.gen == gen {
 		select {
-		case <-c.pubClosed:
-			c.resetPubChannelLocked()
+		case <-st.closed:
+			st.resetLocked()
 		default:
-			return c.pubCh, nil
+			return st.ch, nil
 		}
 	} else {
-		c.resetPubChannelLocked()
+		st.resetLocked()
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("mq open publish channel: %w", err)
 	}
-	if err := ch.Confirm(false); err != nil {
-		_ = ch.Close()
-		return nil, fmt.Errorf("mq enable publisher confirm: %w", err)
+	if st.confirm {
+		if err := ch.Confirm(false); err != nil {
+			_ = ch.Close()
+			return nil, fmt.Errorf("mq enable publisher confirm: %w", err)
+		}
 	}
 
-	c.pubCh = ch
-	c.pubGen = gen
-	c.pubClosed = ch.NotifyClose(make(chan *amqp.Error, 1))
+	st.ch = ch
+	st.gen = gen
+	st.closed = ch.NotifyClose(make(chan *amqp.Error, 1))
 	return ch, nil
 }
 
-func (c *Client) resetPubChannelLocked() {
-	if c.pubCh != nil && !c.pubCh.IsClosed() {
-		_ = c.pubCh.Close()
+func (st *pubChannelState) resetLocked() {
+	if st.ch != nil && !st.ch.IsClosed() {
+		_ = st.ch.Close()
 	}
-	c.pubCh = nil
-	c.pubClosed = nil
+	st.ch = nil
+	st.closed = nil
+}
+
+func (st *pubChannelState) close() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	var err error
+	if st.ch != nil && !st.ch.IsClosed() {
+		if closeErr := st.ch.Close(); closeErr != nil && !errors.Is(closeErr, amqp.ErrClosed) {
+			err = closeErr
+		}
+	}
+	st.ch = nil
+	st.closed = nil
+	return err
 }
 
 func (c *Client) maintainLoop(ctx context.Context) {

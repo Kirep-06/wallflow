@@ -13,7 +13,8 @@ const (
 	ExchangeDLX    = "wallpaper.dlx"    // direct 死信与延迟回流交换机
 
 	// 业务路由键
-	RoutingKeyWallpaperPublished = "wallpaper.published"
+	RoutingKeyWallpaperPublished   = "wallpaper.published"
+	RoutingKeyWallpaperInteraction = "wallpaper.interaction"
 
 	// M5 关注流三队列闭环（主队列 -> 5s 延迟重试队列 -> 终态 DLQ）
 	QueueFollowingFanout      = "feed.following.fanout"
@@ -24,6 +25,11 @@ const (
 	RoutingKeyFollowingFanoutWork  = "feed.following.fanout.work"
 	RoutingKeyFollowingFanoutRetry = "feed.following.fanout.retry"
 	RoutingKeyFollowingFanoutDLQ   = "feed.following.fanout.dlq"
+
+	// M6 高频互动计数聚合队列与独立毒丸 DLQ
+	QueueStatsInteractionAgg         = "stats.interaction.agg"
+	QueueStatsInteractionAggDLQ      = "stats.interaction.agg.dlq"
+	RoutingKeyStatsInteractionAggDLQ = "stats.interaction.agg.dlq"
 
 	// 重试诊断头与队列级延迟 TTL
 	HeaderRetryCount       = "x-retry-count"
@@ -74,6 +80,24 @@ func DeclareTopology(ch *amqp.Channel) error {
 	}
 	if err := ch.QueueBind(QueueFollowingFanout, RoutingKeyFollowingFanoutWork, ExchangeDLX, false, nil); err != nil {
 		return fmt.Errorf("mq bind main queue to dlx work: %w", err)
+	}
+
+	// 4. M6 互动计数削峰队列与独立毒丸死信队列
+	if _, err := ch.QueueDeclare(QueueStatsInteractionAggDLQ, true, false, false, false, nil); err != nil {
+		return fmt.Errorf("mq declare stats agg dlq: %w", err)
+	}
+	if err := ch.QueueBind(QueueStatsInteractionAggDLQ, RoutingKeyStatsInteractionAggDLQ, ExchangeDLX, false, nil); err != nil {
+		return fmt.Errorf("mq bind stats agg dlq: %w", err)
+	}
+	statsArgs := amqp.Table{
+		"x-dead-letter-exchange":    ExchangeDLX,
+		"x-dead-letter-routing-key": RoutingKeyStatsInteractionAggDLQ,
+	}
+	if _, err := ch.QueueDeclare(QueueStatsInteractionAgg, true, false, false, false, statsArgs); err != nil {
+		return fmt.Errorf("mq declare stats agg queue: %w", err)
+	}
+	if err := ch.QueueBind(QueueStatsInteractionAgg, RoutingKeyWallpaperInteraction, ExchangeEvents, false, nil); err != nil {
+		return fmt.Errorf("mq bind stats agg queue to events: %w", err)
 	}
 
 	return nil

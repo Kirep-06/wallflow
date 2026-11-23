@@ -220,6 +220,8 @@ type WallpaperDetail struct {
 	FavCount      uint64          `json:"fav_count"`
 	DownloadCount uint64          `json:"download_count"`
 	CommentCount  uint64          `json:"comment_count"`
+	IsLiked       bool            `json:"is_liked"`
+	IsFavorited   bool            `json:"is_favorited"`
 	Category      CategoryItem    `json:"category"`
 	Tags          []TagItem       `json:"tags"`
 	Author        WallpaperAuthor `json:"author"`
@@ -239,6 +241,8 @@ type WallpaperSummary struct {
 	FavCount      uint64          `json:"fav_count"`
 	DownloadCount uint64          `json:"download_count"`
 	CommentCount  uint64          `json:"comment_count"`
+	IsLiked       bool            `json:"is_liked"`
+	IsFavorited   bool            `json:"is_favorited"`
 	Category      CategoryItem    `json:"category"`
 	Author        WallpaperAuthor `json:"author"`
 	CreatedAt     time.Time       `json:"created_at"`
