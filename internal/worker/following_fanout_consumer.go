@@ -23,8 +23,6 @@ const (
 
 // FollowingFanoutConsumer 消费 wallpaper.published 事件，执行普通作者写扩散或大 V 发件箱追加。
 type FollowingFanoutConsumer struct {
-	connMgr       *mq.ConnManager
-	retryPub      mq.Publisher
 	wallpaperRepo *repository.WallpaperRepository
 	followRepo    *repository.FollowRepository
 	followingFeed *cache.FollowingFeed
@@ -32,30 +30,25 @@ type FollowingFanoutConsumer struct {
 
 // NewFollowingFanoutConsumer 构造关注流推拉扇出消费者。
 func NewFollowingFanoutConsumer(
-	connMgr *mq.ConnManager,
-	retryPub mq.Publisher,
 	wallpaperRepo *repository.WallpaperRepository,
 	followRepo *repository.FollowRepository,
 	followingFeed *cache.FollowingFeed,
 ) *FollowingFanoutConsumer {
 	return &FollowingFanoutConsumer{
-		connMgr:       connMgr,
-		retryPub:      retryPub,
 		wallpaperRepo: wallpaperRepo,
 		followRepo:    followRepo,
 		followingFeed: followingFeed,
 	}
 }
 
-// Run 启动消费者并托管断连重建、三队列重试与停机优雅排空。
-func (c *FollowingFanoutConsumer) Run(ctx context.Context) error {
-	return mq.RunConsumer(ctx, c.connMgr, c.retryPub, mq.ConsumerOptions{
+// Run 在给定 mq.Client 上启动消费者并托管断连重建、三队列重试与停机优雅排空。
+func (c *FollowingFanoutConsumer) Run(ctx context.Context, client *mq.Client) error {
+	return client.Consume(ctx, mq.ConsumerOptions{
 		Queue:           mq.QueueFollowingFanout,
 		ConsumerTag:     fanoutConsumerTag,
 		Prefetch:        fanoutPrefetch,
 		Workers:         fanoutWorkers,
 		MaxRetries:      fanoutMaxRetries,
-		RetryExchange:   mq.ExchangeDLX,
 		RetryRoutingKey: mq.RoutingKeyFollowingFanoutRetry,
 	}, c.handleDelivery)
 }

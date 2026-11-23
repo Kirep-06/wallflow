@@ -46,8 +46,7 @@ type App struct {
 	Logger      *slog.Logger
 	DB          *gorm.DB
 	Redis       *redis.Client
-	MQConn      *mq.ConnManager
-	MQPublisher *mq.ConfirmPublisher
+	MQ          *mq.Client
 	OutboxRelay *worker.OutboxRelay
 	Router      *gin.Engine
 }
@@ -117,15 +116,12 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	followRepo := repository.NewFollowRepository(db)
 
 	var (
-		mqConn      *mq.ConnManager
-		mqPublisher *mq.ConfirmPublisher
+		mqClient    *mq.Client
 		outboxRelay *worker.OutboxRelay
 	)
 	if cfg.RabbitMQ.Enabled {
-		mqConn = mq.NewConnManager(cfg.RabbitMQ)
-		mqPublisher = mq.NewConfirmPublisher(mqConn)
-		outboxRepo := repository.NewOutboxRepository(db)
-		outboxRelay = worker.NewOutboxRelay(outboxRepo, mqPublisher)
+		mqClient = mq.NewClient(cfg.RabbitMQ)
+		outboxRelay = worker.NewOutboxRelay(repository.NewOutboxRepository(db), mqClient)
 	}
 
 	userSvc := service.NewUserService(service.UserServiceDeps{
@@ -179,8 +175,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Logger:      logger,
 		DB:          db,
 		Redis:       rdb,
-		MQConn:      mqConn,
-		MQPublisher: mqPublisher,
+		MQ:          mqClient,
 		OutboxRelay: outboxRelay,
 		Router:      router,
 	}, nil
@@ -189,14 +184,9 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 // Close 按依赖逆序优雅释放 RabbitMQ、Redis 与 MySQL 资源。
 func (a *App) Close() error {
 	var errs []error
-	if a.MQPublisher != nil {
-		if err := a.MQPublisher.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close mq publisher: %w", err))
-		}
-	}
-	if a.MQConn != nil {
-		if err := a.MQConn.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close mq connection: %w", err))
+	if a.MQ != nil {
+		if err := a.MQ.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close mq: %w", err))
 		}
 	}
 	if a.Redis != nil {

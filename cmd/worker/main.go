@@ -69,20 +69,12 @@ func main() {
 	bigVReconciler := worker.NewBigVReconciler(followRepo, bigVSet)
 
 	var (
-		mqConn         *mq.ConnManager
-		retryPublisher *mq.ConfirmPublisher
+		mqClient       *mq.Client
 		fanoutConsumer *worker.FollowingFanoutConsumer
 	)
 	if cfg.RabbitMQ.Enabled {
-		mqConn = mq.NewConnManager(cfg.RabbitMQ)
-		retryPublisher = mq.NewConfirmPublisher(mqConn)
-		fanoutConsumer = worker.NewFollowingFanoutConsumer(
-			mqConn,
-			retryPublisher,
-			wallpaperRepo,
-			followRepo,
-			followingFeed,
-		)
+		mqClient = mq.NewClient(cfg.RabbitMQ)
+		fanoutConsumer = worker.NewFollowingFanoutConsumer(wallpaperRepo, followRepo, followingFeed)
 	} else {
 		logger.Info("rabbitmq disabled, following fanout consumer skipped")
 	}
@@ -98,7 +90,7 @@ func main() {
 	})
 	if fanoutConsumer != nil {
 		g.Go(func() error {
-			return fanoutConsumer.Run(gctx)
+			return fanoutConsumer.Run(gctx, mqClient)
 		})
 	}
 
@@ -111,14 +103,9 @@ func main() {
 	}
 
 	// 任务全部优雅排空退出后，再逆序释放 RabbitMQ 连接（defer 继续释放 Redis 与 MySQL）。
-	if retryPublisher != nil {
-		if err := retryPublisher.Close(); err != nil {
-			logger.Error("close mq retry publisher failed", slog.Any("err", err))
-		}
-	}
-	if mqConn != nil {
-		if err := mqConn.Close(); err != nil {
-			logger.Error("close mq connection failed", slog.Any("err", err))
+	if mqClient != nil {
+		if err := mqClient.Close(); err != nil {
+			logger.Error("close mq client failed", slog.Any("err", err))
 		}
 	}
 	logger.Info("shutdown signal received, worker stopped")

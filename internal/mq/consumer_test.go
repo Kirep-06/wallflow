@@ -67,7 +67,6 @@ func TestHandleDeliveryRouting(t *testing.T) {
 	baseOpts := ConsumerOptions{
 		Queue:           QueueFollowingFanout,
 		MaxRetries:      5,
-		RetryExchange:   ExchangeDLX,
 		RetryRoutingKey: RoutingKeyFollowingFanoutRetry,
 	}
 

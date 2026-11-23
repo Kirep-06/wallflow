@@ -16,10 +16,10 @@ const (
 	defaultConsumerPrefetch = 8
 	defaultConsumerWorkers  = 4
 	defaultMaxRetries       = 5
-	defaultDrainTimeout     = 15 * time.Second
-	defaultHandleTimeout    = 30 * time.Second
+	consumerDrainTimeout    = 15 * time.Second
+	consumerHandleTimeout   = 30 * time.Second
 	maxHeaderErrorLen       = 256
-	consumerRetryWait       = time.Second
+	consumerReconnectWait   = time.Second
 )
 
 // ErrPermanent 标识不可恢复的毒丸消息错误，消费框架将直接 Nack(requeue=false) 送入终态 DLQ。
@@ -44,16 +44,14 @@ type Delivery struct {
 // MessageHandler 为单条队列消息的业务处理回调。
 type MessageHandler func(ctx context.Context, d Delivery) error
 
-// ConsumerOptions 配置通用消费器的队列、并发度、重试目标与优雅排空超时。
+// ConsumerOptions 配置消费队列、并发度与延迟重试路由键。
 type ConsumerOptions struct {
 	Queue           string
 	ConsumerTag     string
 	Prefetch        int
 	Workers         int
 	MaxRetries      int
-	RetryExchange   string
 	RetryRoutingKey string
-	DrainTimeout    time.Duration
 }
 
 type deliveryAcker interface {
@@ -61,16 +59,10 @@ type deliveryAcker interface {
 	Nack(multiple, requeue bool) error
 }
 
-// RunConsumer 在 ConnManager 上运行具备断线重连重建、有界并发 worker、三队列延迟重试与
+// Consume 在 Client 上运行具备断线重连重建、有界并发 worker、三队列延迟重试与
 // channel.Cancel 优雅排空能力的消费者循环，直至 ctx 取消并排空在途消息后返回。
-func RunConsumer(
-	ctx context.Context,
-	connMgr *ConnManager,
-	retryPub Publisher,
-	opts ConsumerOptions,
-	handler MessageHandler,
-) error {
-	if connMgr == nil {
+func (c *Client) Consume(ctx context.Context, opts ConsumerOptions, handler MessageHandler) error {
+	if c == nil {
 		return ErrNotConnected
 	}
 	opts = normalizeConsumerOptions(opts)
@@ -80,7 +72,7 @@ func RunConsumer(
 			return nil
 		}
 
-		conn, _, err := connMgr.WaitReady(ctx)
+		conn, err := c.waitReady(ctx)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, ErrClosed) {
 				return nil
@@ -88,7 +80,7 @@ func RunConsumer(
 			return err
 		}
 
-		if err := consumeSession(ctx, conn, retryPub, opts, handler); err != nil && ctx.Err() == nil {
+		if err := consumeSession(ctx, conn, c, opts, handler); err != nil && ctx.Err() == nil {
 			slog.Warn("rabbitmq consumer session ended, waiting for reconnect",
 				slog.String("queue", opts.Queue),
 				slog.Any("err", err),
@@ -98,7 +90,7 @@ func RunConsumer(
 			return nil
 		}
 
-		timer := time.NewTimer(consumerRetryWait)
+		timer := time.NewTimer(consumerReconnectWait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -140,16 +132,14 @@ func consumeSession(
 		slog.Int("workers", opts.Workers),
 	)
 
-	// 停机信号触发时先 channel.Cancel 停止拉取新消息，由 Broker 关闭 deliveries 通道实现平滑排空。
+	// 停机时先 channel.Cancel 停止拉取新消息，由 Broker 关闭 deliveries 实现在途排空。
 	sessionDone := make(chan struct{})
 	cancelDone := make(chan struct{})
 	go func() {
 		defer close(cancelDone)
 		select {
 		case <-ctx.Done():
-			slog.Info("rabbitmq consumer draining in-flight deliveries",
-				slog.String("queue", opts.Queue),
-			)
+			slog.Info("rabbitmq consumer draining in-flight deliveries", slog.String("queue", opts.Queue))
 			if err := ch.Cancel(opts.ConsumerTag, false); err != nil && !errors.Is(err, amqp.ErrClosed) {
 				slog.Warn("rabbitmq consumer channel cancel failed",
 					slog.String("queue", opts.Queue),
@@ -167,15 +157,14 @@ func consumeSession(
 		go func() {
 			defer wg.Done()
 			for raw := range deliveries {
-				handleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultHandleTimeout)
+				handleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consumerHandleTimeout)
 				d := Delivery{
 					Body:       raw.Body,
 					MessageID:  raw.MessageId,
 					Headers:    raw.Headers,
 					RetryCount: parseRetryCount(raw.Headers),
 				}
-				acked := lockedAcker{mu: &ackMu, inner: raw}
-				handleDelivery(handleCtx, d, acked, retryPub, opts, handler)
+				handleDelivery(handleCtx, d, lockedAcker{mu: &ackMu, inner: raw}, retryPub, opts, handler)
 				cancel()
 			}
 		}()
@@ -190,14 +179,14 @@ func consumeSession(
 	select {
 	case <-waitDone:
 	case <-ctx.Done():
-		drainTimer := time.NewTimer(opts.DrainTimeout)
+		drainTimer := time.NewTimer(consumerDrainTimeout)
 		defer drainTimer.Stop()
 		select {
 		case <-waitDone:
 		case <-drainTimer.C:
 			slog.Warn("rabbitmq consumer drain timed out",
 				slog.String("queue", opts.Queue),
-				slog.Duration("timeout", opts.DrainTimeout),
+				slog.Duration("timeout", consumerDrainTimeout),
 			)
 		}
 	}
@@ -224,7 +213,6 @@ func (a lockedAcker) Nack(multiple, requeue bool) error {
 	return a.inner.Nack(multiple, requeue)
 }
 
-// handleDelivery 执行单条消息的业务处理、毒丸直进 DLQ 与延迟重试队列重投闭环。
 func handleDelivery(
 	ctx context.Context,
 	d Delivery,
@@ -270,14 +258,14 @@ func handleDelivery(
 	headers[HeaderLastError] = truncateError(err, maxHeaderErrorLen)
 
 	pubErr := retryPub.Publish(ctx, PublishMessage{
-		Exchange:   opts.RetryExchange,
+		Exchange:   ExchangeDLX,
 		RoutingKey: opts.RetryRoutingKey,
 		MessageID:  d.MessageID,
 		Body:       d.Body,
 		Headers:    headers,
 	})
 	if pubErr != nil {
-		// 重投重试队列失败时严禁提前 Ack，交由 Broker 回收重投防止消息蒸发。
+		// 重投重试队列失败时严禁提前 Ack，交由 Broker 回收重投防丢消息。
 		slog.WarnContext(ctx, "rabbitmq publish to retry queue failed, requeuing",
 			slog.String("queue", opts.Queue),
 			slog.String("message_id", d.MessageID),
@@ -312,12 +300,6 @@ func normalizeConsumerOptions(opts ConsumerOptions) ConsumerOptions {
 	}
 	if opts.MaxRetries < 0 {
 		opts.MaxRetries = defaultMaxRetries
-	}
-	if opts.DrainTimeout <= 0 {
-		opts.DrainTimeout = defaultDrainTimeout
-	}
-	if opts.RetryExchange == "" {
-		opts.RetryExchange = ExchangeDLX
 	}
 	return opts
 }
