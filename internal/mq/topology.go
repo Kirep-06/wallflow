@@ -6,36 +6,29 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+// RabbitMQ 交换机、队列、路由键与重试头常量（M5/M6/M7 复用）。
 const (
-	// ExchangeEvents 为全站统一业务事件 topic 交换机（M5/M6/M7 共用）。
-	ExchangeEvents = "wallpaper.events"
-	// ExchangeDLX 为全站统一死信与延迟回流 direct 交换机（按精确 routing_key 隔离，严禁 topic + "#"）。
-	ExchangeDLX = "wallpaper.dlx"
+	// 交换机
+	ExchangeEvents = "wallpaper.events" // topic 业务事件总交换机
+	ExchangeDLX    = "wallpaper.dlx"    // direct 死信与延迟回流交换机
 
-	// RoutingKeyWallpaperPublished 为 M5 壁纸投稿发布事件路由键。
+	// 业务路由键
 	RoutingKeyWallpaperPublished = "wallpaper.published"
 
-	// QueueFollowingFanout 为关注流推拉扇出主消费队列。
-	QueueFollowingFanout = "feed.following.fanout"
-	// QueueFollowingFanoutRetry 为 5s 固定 TTL 无消费者延迟重试队列。
+	// M5 关注流三队列闭环（主队列 -> 5s 延迟重试队列 -> 终态 DLQ）
+	QueueFollowingFanout      = "feed.following.fanout"
 	QueueFollowingFanoutRetry = "feed.following.fanout.retry"
-	// QueueFollowingFanoutDLQ 为超限或毒丸消息终态死信队列。
-	QueueFollowingFanoutDLQ = "feed.following.fanout.dlq"
+	QueueFollowingFanoutDLQ   = "feed.following.fanout.dlq"
 
-	// RoutingKeyFollowingFanoutWork 为重试队列到期回流主队列的精确路由键。
-	RoutingKeyFollowingFanoutWork = "feed.following.fanout.work"
-	// RoutingKeyFollowingFanoutRetry 为消费瞬态失败投往重试队列的精确路由键。
+	// M5 精确死信路由键
+	RoutingKeyFollowingFanoutWork  = "feed.following.fanout.work"
 	RoutingKeyFollowingFanoutRetry = "feed.following.fanout.retry"
-	// RoutingKeyFollowingFanoutDLQ 为主队列原生死信投往终态 DLQ 的精确路由键。
-	RoutingKeyFollowingFanoutDLQ = "feed.following.fanout.dlq"
+	RoutingKeyFollowingFanoutDLQ   = "feed.following.fanout.dlq"
 
-	// HeaderRetryCount 记录消息已经过延迟重试队列的次数。
-	HeaderRetryCount = "x-retry-count"
-	// HeaderLastError 记录最近一次消费失败的截断摘要。
-	HeaderLastError = "x-last-error"
-
-	// RetryDelayMS 为延迟重试队列的统一队列级 TTL（毫秒），避免 per-message TTL 队头阻塞。
-	RetryDelayMS int32 = 5000
+	// 重试诊断头与队列级延迟 TTL
+	HeaderRetryCount       = "x-retry-count"
+	HeaderLastError        = "x-last-error"
+	RetryDelayMS     int32 = 5000
 )
 
 // DeclareTopology 幂等声明 M5 所需的交换机、三队列闭环与精确绑定关系。

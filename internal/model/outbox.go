@@ -5,13 +5,11 @@ import (
 	"time"
 )
 
+// OutboxEvent 状态枚举（显式数值，禁止 iota）。
 const (
-	// OutboxStatusPending 表示事件待投递。
-	OutboxStatusPending uint8 = 0
-	// OutboxStatusPublished 表示事件已获 RabbitMQ Broker Confirm 落盘确认。
-	OutboxStatusPublished uint8 = 1
-	// OutboxStatusDead 表示事件超过最大重试次数进入 DB 死信态。
-	OutboxStatusDead uint8 = 2
+	OutboxStatusPending   uint8 = 0 // 待投递
+	OutboxStatusPublished uint8 = 1 // 已确认落盘投递
+	OutboxStatusDead      uint8 = 2 // 超限死信态
 )
 
 // OutboxEvent 对应 outbox_events 事务发件箱表（DB 实体刻意不加 json tag）。
