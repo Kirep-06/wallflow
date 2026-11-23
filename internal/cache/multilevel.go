@@ -36,6 +36,16 @@ type sfResult[T any] struct {
 	notFound bool
 }
 
+// MultiLevelOption 配置 MultiLevel 缓存的可选行为。
+type MultiLevelOption[T any] func(*MultiLevel[T])
+
+// WithL2TTLFunc 按值动态计算 L2 基础 TTL（再叠加 ±10% 随机抖动）；返回 <=0 时回落默认 l2TTL。
+func WithL2TTLFunc[T any](fn func(T) time.Duration) MultiLevelOption[T] {
+	return func(m *MultiLevel[T]) {
+		m.l2TTLFunc = fn
+	}
+}
+
 // MultiLevel 实现通用的 L1(Kirep-06/gocache) -> L2(Redis) -> L3(Loader) 三级缓存。
 // 内置 singleflight 防击穿、空值标记防穿透、L2 ±10% TTL 抖动防雪崩，
 // 以及 Redis 故障时透明降级回源能力。
@@ -45,13 +55,19 @@ type MultiLevel[T any] struct {
 	l1TTLSec     int
 	nullL1TTLSec int
 	l2TTL        time.Duration
+	l2TTLFunc    func(T) time.Duration
 	sf           singleflight.Group
 }
 
 // NewMultiLevel 构造指定类型的通用三级缓存组件。
 // l1TTL / l2TTL 传入非正值时自动使用默认值（30s / 30m）；
 // 空值缓存 TTL（60s）、L2 抖动（±10%）与回源超时（5s）使用统一内置策略。
-func NewMultiLevel[T any](l1 *gocache.Cache, l2 *redis.Client, l1TTL, l2TTL time.Duration) *MultiLevel[T] {
+func NewMultiLevel[T any](
+	l1 *gocache.Cache,
+	l2 *redis.Client,
+	l1TTL, l2TTL time.Duration,
+	opts ...MultiLevelOption[T],
+) *MultiLevel[T] {
 	if l1TTL <= 0 {
 		l1TTL = defaultL1TTL
 	}
@@ -59,13 +75,19 @@ func NewMultiLevel[T any](l1 *gocache.Cache, l2 *redis.Client, l1TTL, l2TTL time
 		l2TTL = defaultL2TTL
 	}
 
-	return &MultiLevel[T]{
+	m := &MultiLevel[T]{
 		l1:           l1,
 		l2:           l2,
 		l1TTLSec:     ttlToSeconds(l1TTL),
 		nullL1TTLSec: ttlToSeconds(min(l1TTL, nullL2TTL)),
 		l2TTL:        l2TTL,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(m)
+		}
+	}
+	return m
 }
 
 // Get 按 L1 -> L2 -> singleflight(L3 Loader) 顺序读取缓存，未命中时自动回填。
@@ -122,7 +144,7 @@ func (m *MultiLevel[T]) Get(ctx context.Context, key string, loader func(context
 			return sfResult[T]{value: val}, nil
 		}
 
-		m.setL2Bytes(loadCtx, key, encoded)
+		m.setL2Bytes(loadCtx, key, encoded, m.l2TTLFor(val))
 		m.setL1Bytes(loadCtx, key, encoded, m.l1TTLSec)
 		return sfResult[T]{value: val}, nil
 	})
@@ -143,6 +165,150 @@ func (m *MultiLevel[T]) Get(ctx context.Context, key string, loader func(context
 		}
 		return loaded.value, nil
 	}
+}
+
+// MGet 按 L1 -> Redis MGET -> 单次 batchLoader(L3) + Pipeline 回填顺序批量读取缓存。
+// 返回命中的 key->T 映射（不存在或命中空值哨兵的 key 不出现在结果 map 中）。
+func (m *MultiLevel[T]) MGet(
+	ctx context.Context,
+	keys []string,
+	batchLoader func(context.Context, []string) (map[string]T, error),
+) (map[string]T, error) {
+	if len(keys) == 0 {
+		return map[string]T{}, nil
+	}
+
+	// 去重保序，避免重复查缓存与回源。
+	uniqueKeys := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		uniqueKeys = append(uniqueKeys, k)
+	}
+
+	result := make(map[string]T, len(uniqueKeys))
+
+	// 1. 批量读取 L1 进程内缓存。
+	l1Miss := make([]string, 0, len(uniqueKeys))
+	for _, k := range uniqueKeys {
+		if val, hit, notFound := m.getL1(ctx, k); hit {
+			if !notFound {
+				result[k] = val
+			}
+			continue
+		}
+		l1Miss = append(l1Miss, k)
+	}
+	if len(l1Miss) == 0 {
+		return result, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// 2. 批量读取 L2 Redis MGET；Redis 异常时透明降级为全量回源。
+	var l2Miss []string
+	if m.l2 == nil {
+		l2Miss = l1Miss
+	} else {
+		vals, err := m.l2.MGet(ctx, l1Miss...).Result()
+		if err != nil {
+			slog.WarnContext(ctx, "cache l2 mget degraded to batch loader",
+				slog.Int("key_count", len(l1Miss)),
+				slog.Any("err", err),
+			)
+			l2Miss = l1Miss
+		} else {
+			l2Miss = make([]string, 0, len(l1Miss))
+			for i, k := range l1Miss {
+				if i >= len(vals) || vals[i] == nil {
+					l2Miss = append(l2Miss, k)
+					continue
+				}
+				rawStr, ok := vals[i].(string)
+				if !ok {
+					l2Miss = append(l2Miss, k)
+					continue
+				}
+				raw := []byte(rawStr)
+				if bytes.Equal(raw, nilMarkerBytes) {
+					m.setL1Bytes(ctx, k, nilMarkerBytes, m.nullL1TTLSec)
+					continue
+				}
+				var decoded T
+				if err := json.Unmarshal(raw, &decoded); err != nil {
+					slog.WarnContext(ctx, "cache l2 mget unmarshal failed, reloading",
+						slog.String("key", k),
+						slog.Any("err", err),
+					)
+					l2Miss = append(l2Miss, k)
+					continue
+				}
+				m.setL1Bytes(ctx, k, raw, m.l1TTLSec)
+				result[k] = decoded
+			}
+		}
+	}
+
+	if len(l2Miss) == 0 || batchLoader == nil {
+		return result, nil
+	}
+
+	// 3. 单次批量回源 L3，并用一次 Redis Pipeline + L1 同步回填（含空值防穿透）。
+	loadCtx, cancel := context.WithTimeout(ctx, loaderTimeout)
+	defer cancel()
+
+	loaded, err := batchLoader(loadCtx, l2Miss)
+	if err != nil {
+		return nil, err
+	}
+
+	var pipe redis.Pipeliner
+	if m.l2 != nil {
+		pipe = m.l2.Pipeline()
+	}
+
+	hasPipeCmd := false
+	for _, k := range l2Miss {
+		val, found := loaded[k]
+		if !found {
+			m.setL1Bytes(loadCtx, k, nilMarkerBytes, m.nullL1TTLSec)
+			if pipe != nil {
+				pipe.Set(loadCtx, k, NilMarker, applyJitter(nullL2TTL))
+				hasPipeCmd = true
+			}
+			continue
+		}
+
+		result[k] = val
+		encoded, err := json.Marshal(val)
+		if err != nil {
+			slog.WarnContext(loadCtx, "cache mget marshal value failed",
+				slog.String("key", k),
+				slog.Any("err", err),
+			)
+			continue
+		}
+		m.setL1Bytes(loadCtx, k, encoded, m.l1TTLSec)
+		if pipe != nil {
+			pipe.Set(loadCtx, k, encoded, applyJitter(m.l2TTLFor(val)))
+			hasPipeCmd = true
+		}
+	}
+
+	if pipe != nil && hasPipeCmd {
+		if _, err := pipe.Exec(loadCtx); err != nil {
+			slog.WarnContext(loadCtx, "cache l2 mget pipeline backfill failed",
+				slog.Int("key_count", len(l2Miss)),
+				slog.Any("err", err),
+			)
+		}
+	}
+
+	return result, nil
 }
 
 // Delete 执行写后失效：先删 L1 并遗忘在途单飞，再删 L2 Redis。
@@ -233,11 +399,20 @@ func (m *MultiLevel[T]) getL2(ctx context.Context, key string) (val T, raw []byt
 	return decoded, data, true, false
 }
 
-func (m *MultiLevel[T]) setL2Bytes(ctx context.Context, key string, encoded []byte) {
+func (m *MultiLevel[T]) l2TTLFor(val T) time.Duration {
+	if m.l2TTLFunc != nil {
+		if custom := m.l2TTLFunc(val); custom > 0 {
+			return custom
+		}
+	}
+	return m.l2TTL
+}
+
+func (m *MultiLevel[T]) setL2Bytes(ctx context.Context, key string, encoded []byte, baseTTL time.Duration) {
 	if m.l2 == nil {
 		return
 	}
-	ttl := applyJitter(m.l2TTL)
+	ttl := applyJitter(baseTTL)
 	if err := m.l2.Set(ctx, key, encoded, ttl).Err(); err != nil {
 		slog.WarnContext(ctx, "cache l2 set failed",
 			slog.String("key", key),
