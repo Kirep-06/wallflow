@@ -23,6 +23,7 @@ type FollowTxResult struct {
 	Changed       bool
 	FollowerCount int64
 	IsBigV        bool
+	PromotedBigV  bool
 }
 
 // FollowRepository 封装 user_follows 与 user_follow_stats 的防死锁写事务与覆盖索引读查询。
@@ -123,6 +124,7 @@ func (r *FollowRepository) followOnce(
 			Changed:       true,
 			FollowerCount: int64(newFollower),
 			IsBigV:        newIsBigV == 1,
+			PromotedBigV:  followeeStats.IsBigV == 0 && newIsBigV == 1,
 		}
 		return nil
 	})
@@ -309,6 +311,41 @@ func (r *FollowRepository) ListFollowingPage(ctx context.Context, followerID, be
 // ListFollowerPage 经 idx_followee_list 覆盖索引零回表倒序查询用户粉丝列表页。
 func (r *FollowRepository) ListFollowerPage(ctx context.Context, followeeID, beforeID uint64, limit int) ([]model.FollowEdge, error) {
 	return r.listFollowEdges(ctx, "followee_id", "follower_id", followeeID, beforeID, limit)
+}
+
+// ListFollowerIDsAfter 经 idx_followee_list 覆盖索引升序分批扫描创作者粉丝（供 M5 写扩散每批 500 顺扫）。
+func (r *FollowRepository) ListFollowerIDsAfter(ctx context.Context, followeeID, afterID uint64, limit int) ([]model.FollowEdge, error) {
+	if followeeID == 0 || limit <= 0 {
+		return []model.FollowEdge{}, nil
+	}
+
+	q := r.db.WithContext(ctx).
+		Table(model.UserFollow{}.TableName()).
+		Select("id, follower_id AS peer_id").
+		Where("followee_id = ?", followeeID)
+	if afterID > 0 {
+		q = q.Where("id > ?", afterID)
+	}
+
+	var edges []model.FollowEdge
+	if err := q.Order("id ASC").Limit(limit).Scan(&edges).Error; err != nil {
+		return nil, fmt.Errorf("list follower ids after: %w", err)
+	}
+	return edges, nil
+}
+
+// ListAllBigVIDs 经 idx_bigv 覆盖索引零回表扫描全站全部大 V 用户 ID（升序）。
+func (r *FollowRepository) ListAllBigVIDs(ctx context.Context) ([]uint64, error) {
+	ids := make([]uint64, 0)
+	if err := r.db.WithContext(ctx).
+		Table(model.UserFollowStats{}.TableName()).
+		Select("user_id").
+		Where("is_bigv = ?", 1).
+		Order("user_id ASC").
+		Pluck("user_id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("list all bigv ids: %w", err)
+	}
+	return ids, nil
 }
 
 func (r *FollowRepository) listFollowEdges(

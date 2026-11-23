@@ -27,8 +27,14 @@ func NewWallpaperRepository(db *gorm.DB) *WallpaperRepository {
 	return &WallpaperRepository{db: db}
 }
 
-// CreateWithTags 在单次短事务内写入壁纸、按需建标签并递增标签计数（按 tag_id 升序防死锁）。
-func (r *WallpaperRepository) CreateWithTags(ctx context.Context, wp *model.Wallpaper, tagNames []string) ([]model.Tag, error) {
+// CreateWithTags 在单次短事务内写入壁纸、按需建标签递增计数（按 tag_id 升序防死锁），
+// 当 buildOutbox 非空时在同一本地事务内写入 outbox_events 实现 Transactional Outbox。
+func (r *WallpaperRepository) CreateWithTags(
+	ctx context.Context,
+	wp *model.Wallpaper,
+	tagNames []string,
+	buildOutbox func(*model.Wallpaper) (*model.OutboxEvent, error),
+) ([]model.Tag, error) {
 	attached := make([]model.Tag, 0, len(tagNames))
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(wp).Error; err != nil {
@@ -82,13 +88,43 @@ func (r *WallpaperRepository) CreateWithTags(ctx context.Context, wp *model.Wall
 			}
 		}
 
-		// M5: 同事务写入 outbox_events (wallpaper.published)
+		if buildOutbox != nil {
+			ev, err := buildOutbox(wp)
+			if err != nil {
+				return fmt.Errorf("wallpaper repo build outbox event: %w", err)
+			}
+			if ev != nil {
+				if err := tx.Create(ev).Error; err != nil {
+					return fmt.Errorf("wallpaper repo insert outbox event: %w", err)
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return attached, nil
+}
+
+// IsActive 核验指定壁纸当前是否处于正常可见状态（供异步扇出消费前防软删幽灵写回）。
+func (r *WallpaperRepository) IsActive(ctx context.Context, id uint64) (bool, error) {
+	if id == 0 {
+		return false, nil
+	}
+	var status uint8
+	err := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()).
+		Select("status").
+		Where("id = ?", id).
+		Take(&status).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("wallpaper repo is active: %w", err)
+	}
+	return status == model.WallpaperStatusActive, nil
 }
 
 // FindOwnerByID 查询壁纸归属与状态，用于作者软删前校验。
@@ -266,6 +302,17 @@ func (r *WallpaperRepository) ListUserWallpaperIDs(ctx context.Context, userID, 
 		Table(model.Wallpaper{}.TableName()).
 		Where("user_id = ? AND status = ?", userID, model.WallpaperStatusActive)
 	return listWallpaperIDs(q, "id", beforeID, limit, "list user wallpaper ids")
+}
+
+// ListAuthorsWallpaperIDs 命中覆盖索引 idx_user_status_id 倒序查询多作者最新正常壁纸 ID（用于收件箱懒重建与关注流冷补查）。
+func (r *WallpaperRepository) ListAuthorsWallpaperIDs(ctx context.Context, authorIDs []uint64, beforeID uint64, limit int) ([]uint64, error) {
+	if len(authorIDs) == 0 || limit <= 0 {
+		return []uint64{}, nil
+	}
+	q := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()).
+		Where("user_id IN ? AND status = ?", authorIDs, model.WallpaperStatusActive)
+	return listWallpaperIDs(q, "id", beforeID, limit, "list authors wallpaper ids")
 }
 
 // ListTagWallpaperIDs 命中 wallpaper_tags.idx_tag_wp 倒序有序驱动并过滤正常状态，返回指定标签下的壁纸 ID。

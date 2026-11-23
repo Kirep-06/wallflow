@@ -169,7 +169,7 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		SizeBytes:   uint64(meta.SizeBytes),
 		Status:      model.WallpaperStatusActive,
 	}
-	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames)
+	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames, nil)
 	if err != nil {
 		if errors.Is(err, repository.ErrDuplicateObjectKey) {
 			return nil, errno.ErrDuplicateObjectKey
