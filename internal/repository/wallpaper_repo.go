@@ -342,6 +342,28 @@ func (r *WallpaperRepository) ListTagWallpaperIDs(ctx context.Context, tagID, be
 	return listWallpaperIDs(q, "wt.wallpaper_id", beforeID, limit, "list tag wallpaper ids")
 }
 
+// ListHotRankBatch 命中 idx_status_id 倒序分批扫描正常壁纸并主键点查 wallpaper_stats（零 filesort，供 M7 热门榜算分）。
+func (r *WallpaperRepository) ListHotRankBatch(ctx context.Context, beforeID uint64, limit int) ([]model.HotRankCandidate, error) {
+	if limit <= 0 {
+		return []model.HotRankCandidate{}, nil
+	}
+
+	q := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()+" AS w").
+		Select("w.id, w.created_at, COALESCE(ws.like_count, 0) AS like_count, COALESCE(ws.fav_count, 0) AS fav_count, COALESCE(ws.download_count, 0) AS download_count, COALESCE(ws.comment_count, 0) AS comment_count").
+		Joins("LEFT JOIN "+model.WallpaperStats{}.TableName()+" AS ws ON ws.wallpaper_id = w.id").
+		Where("w.status = ?", model.WallpaperStatusActive)
+	if beforeID > 0 {
+		q = q.Where("w.id < ?", beforeID)
+	}
+
+	rows := make([]model.HotRankCandidate, 0, limit)
+	if err := q.Order("w.id DESC").Limit(limit).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("wallpaper repo list hot rank batch: %w", err)
+	}
+	return rows, nil
+}
+
 func listWallpaperIDs(q *gorm.DB, idCol string, beforeID uint64, limit int, op string) ([]uint64, error) {
 	if limit <= 0 {
 		return []uint64{}, nil
