@@ -20,7 +20,7 @@ type RouterDeps struct {
 	WallpaperHandler *WallpaperHandler
 }
 
-// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2）。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2 + M3）。
 func NewRouter(deps RouterDeps) *gin.Engine {
 	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
@@ -62,15 +62,18 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.GET("/me", authRequired, deps.UserHandler.GetMe)
 			users.PATCH("/me", authRequired, deps.UserHandler.PatchMe)
 			users.GET("/:id", authOptional, deps.UserHandler.GetPublicProfile)
+			users.GET("/:id/wallpapers", authOptional, deps.WallpaperHandler.ListUserWallpapers)
 		}
 
-		// M2: 分类、标签、直传凭证与壁纸投稿管理
+		// M2 + M3: 分类、标签、直传凭证与壁纸画廊/投稿管理
 		v1.GET("/categories", deps.MetaHandler.ListCategories)
 		v1.GET("/tags", deps.MetaHandler.ListTags)
 		v1.POST("/uploads/token", authRequired, deps.UploadHandler.CreateUploadToken)
 
 		wallpapers := v1.Group("/wallpapers")
 		{
+			wallpapers.GET("", authOptional, deps.WallpaperHandler.ListWallpapers)
+			wallpapers.GET("/:id", authOptional, deps.WallpaperHandler.GetWallpaperDetail)
 			wallpapers.POST("", authRequired, deps.WallpaperHandler.CreateWallpaper)
 			wallpapers.DELETE("/:id", authRequired, deps.WallpaperHandler.DeleteWallpaper)
 		}

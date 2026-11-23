@@ -62,3 +62,11 @@ func parsePositiveUint64(raw, errMsg string) (uint64, error) {
 	}
 	return id, nil
 }
+
+// parseOptionalPositiveUint64 解析可选的正整数查询参数；空串返回 0，非空校验失败返回 10002。
+func parseOptionalPositiveUint64(raw, errMsg string) (uint64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	return parsePositiveUint64(raw, errMsg)
+}
