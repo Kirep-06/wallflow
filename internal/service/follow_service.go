@@ -41,12 +41,22 @@ func WithBigVPromoteThreshold(n int64) FollowOption {
 	}
 }
 
+// WithFollowFeedCaches 注入关注流缓存，用于关注/取关普通作者时失效收件箱与大 V 首次晋升预热。
+func WithFollowFeedCaches(ff *cache.FollowingFeed, bigV *cache.BigVSet) FollowOption {
+	return func(s *FollowService) {
+		s.followingFeed = ff
+		s.bigVSet = bigV
+	}
+}
+
 // FollowService 负责关注/取关写事务编排、缓存失效与关注/粉丝列表批量装配。
 type FollowService struct {
 	followRepo        *repository.FollowRepository
 	userSvc           *UserService
 	followStatsCache  *cache.MultiLevel[model.FollowStatsCache]
 	followingIDsCache *cache.MultiLevel[[]uint64]
+	followingFeed     *cache.FollowingFeed
+	bigVSet           *cache.BigVSet
 	maxFollowing      int64
 	bigVThreshold     int64
 }
@@ -93,7 +103,7 @@ func (s *FollowService) Follow(ctx context.Context, followerID, targetID uint64)
 	}
 
 	if res.Changed {
-		s.invalidateAfterChange(ctx, followerID, targetID)
+		s.invalidateAfterChange(ctx, followerID, targetID, res.IsBigV, res.PromotedBigV)
 	}
 
 	return &model.FollowActionResult{
@@ -124,7 +134,7 @@ func (s *FollowService) Unfollow(ctx context.Context, followerID, targetID uint6
 	}
 
 	if res.Changed {
-		s.invalidateAfterChange(ctx, followerID, targetID)
+		s.invalidateAfterChange(ctx, followerID, targetID, res.IsBigV, false)
 	}
 
 	return &model.FollowActionResult{
@@ -240,7 +250,7 @@ func (s *FollowService) assembleFollowUserPage(
 	return &page, nil
 }
 
-func (s *FollowService) invalidateAfterChange(ctx context.Context, followerID, followeeID uint64) {
+func (s *FollowService) invalidateAfterChange(ctx context.Context, followerID, followeeID uint64, targetIsBigV, promotedBigV bool) {
 	if s.followStatsCache != nil {
 		for _, uid := range []uint64{followerID, followeeID} {
 			if err := s.followStatsCache.Delete(ctx, followStatsKey(uid)); err != nil {
@@ -255,6 +265,24 @@ func (s *FollowService) invalidateAfterChange(ctx context.Context, followerID, f
 		if err := s.followingIDsCache.Delete(ctx, followingIDsKey(followerID)); err != nil {
 			slog.WarnContext(ctx, "invalidate following ids cache failed",
 				slog.Uint64("user_id", followerID),
+				slog.Any("err", err),
+			)
+		}
+	}
+	// 普通作者关注/取关直接 O(1) 删收件箱，下次进入关注页触发懒重建；大 V 变更不影响收件箱。
+	if !targetIsBigV && s.followingFeed != nil {
+		if err := s.followingFeed.DeleteInbox(ctx, followerID); err != nil {
+			slog.WarnContext(ctx, "delete follower inbox after follow change failed",
+				slog.Uint64("user_id", followerID),
+				slog.Any("err", err),
+			)
+		}
+	}
+	// 目标首次晋升大 V 时 best-effort 条件写入 feed:bigvs 并失效本进程 L1 快照。
+	if promotedBigV && s.bigVSet != nil {
+		if err := s.bigVSet.AddIfExists(ctx, followeeID); err != nil {
+			slog.WarnContext(ctx, "add promoted bigv to cache failed",
+				slog.Uint64("user_id", followeeID),
 				slog.Any("err", err),
 			)
 		}

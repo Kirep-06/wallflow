@@ -314,7 +314,7 @@ func TestAssembleSummaryPage_SkipsGhostIDsAndFallbackAuthor(t *testing.T) {
 	_ = mr.Set("user:profile:1", string(u1))
 	_ = mr.Set("user:profile:2", cache.NilMarker)
 
-	page, err := svc.assembleSummaryPage(context.Background(), []uint64{10, 9, 8}, "next-cur", true, nil)
+	page, err := svc.assembleSummaryPage(context.Background(), []uint64{10, 9, 8}, "next-cur", true, nil, nil)
 	if err != nil {
 		t.Fatalf("assembleSummaryPage failed: %v", err)
 	}

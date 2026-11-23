@@ -210,7 +210,12 @@ func TestAssembleFollowUserPage_MGetAndBinarySearchIsFollowing(t *testing.T) {
 
 func TestFollowServiceInvalidateAfterChange(t *testing.T) {
 	mr, profileCache, statsCache, followingCache := newTestFollowCaches(t)
-	svc := NewFollowService(nil, nil, statsCache, followingCache)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	followingFeed := cache.NewFollowingFeed(rdb)
+	bigVSet := cache.NewBigVSet(rdb, 30*time.Second)
+
+	svc := NewFollowService(nil, nil, statsCache, followingCache, WithFollowFeedCaches(followingFeed, bigVSet))
 	ctx := context.Background()
 
 	_ = mr.Set("follow:stats:10", `{"following_count":1,"follower_count":0,"is_bigv":false}`)
@@ -218,6 +223,8 @@ func TestFollowServiceInvalidateAfterChange(t *testing.T) {
 	_ = mr.Set("feed:following_ids:10", `[20]`)
 	_ = mr.Set("feed:following_ids:20", `[30]`)
 	_ = mr.Set("user:profile:10", `{"id":"10","username":"a","nickname":"A","avatar_key":"","bio":""}`)
+	_ = followingFeed.RebuildInbox(ctx, 10, []uint64{100})
+	_ = bigVSet.Reconcile(ctx, []uint64{99})
 
 	// 先触发读填充 L1，确保失效同时清 L1 与 L2。
 	if _, err := statsCache.Get(ctx, "follow:stats:10", nil); err != nil {
@@ -227,9 +234,10 @@ func TestFollowServiceInvalidateAfterChange(t *testing.T) {
 		t.Fatalf("warm L1 following 10: %v", err)
 	}
 
-	svc.invalidateAfterChange(ctx, 10, 20)
+	// 普通作者变更：应同步删除关注者的 feed:inbox:10
+	svc.invalidateAfterChange(ctx, 10, 20, false, false)
 
-	for _, deleted := range []string{"follow:stats:10", "follow:stats:20", "feed:following_ids:10"} {
+	for _, deleted := range []string{"follow:stats:10", "follow:stats:20", "feed:following_ids:10", "feed:inbox:10"} {
 		if mr.Exists(deleted) {
 			t.Fatalf("expected redis key %s to be deleted", deleted)
 		}
@@ -242,6 +250,20 @@ func TestFollowServiceInvalidateAfterChange(t *testing.T) {
 	}
 	if _, err := profileCache.Get(ctx, "user:profile:10", nil); err != nil {
 		t.Fatalf("profile cache should remain readable: %v", err)
+	}
+
+	// 大 V 变更 + 首次晋升：不得误删 feed:inbox:10，且应将 20 增量加入 feed:bigvs
+	_ = followingFeed.RebuildInbox(ctx, 10, []uint64{101})
+	svc.invalidateAfterChange(ctx, 10, 20, true, true)
+	if !mr.Exists("feed:inbox:10") {
+		t.Fatal("bigv follow change must not delete follower inbox")
+	}
+	snap, err := bigVSet.Snapshot(ctx, nil)
+	if err != nil {
+		t.Fatalf("bigv snapshot failed: %v", err)
+	}
+	if _, ok := snap[20]; !ok {
+		t.Fatalf("promoted bigv 20 should be added to feed:bigvs, got %v", snap)
 	}
 }
 

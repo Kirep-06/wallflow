@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 
 	"wallpaper-feed/internal/cache"
 	"wallpaper-feed/internal/model"
+	"wallpaper-feed/internal/mq"
 	"wallpaper-feed/internal/pkg/cursor"
 	"wallpaper-feed/internal/pkg/errno"
 	"wallpaper-feed/internal/pkg/response"
@@ -45,6 +47,28 @@ func WallpaperDetailL2TTL(wp model.WallpaperDetailCache) time.Duration {
 	return wallpaperDetailColdL2TTL
 }
 
+// OutboxNotifier 为投稿提交后即时唤醒进程内 OutboxRelay 的极窄通知接口。
+type OutboxNotifier interface {
+	Notify()
+}
+
+// WallpaperOption 配置 WallpaperService 的可选 M5 联动能力。
+type WallpaperOption func(*WallpaperService)
+
+// WithOutboxNotifier 开启投稿同事务写 outbox_events 并在提交后唤醒中继器。
+func WithOutboxNotifier(n OutboxNotifier) WallpaperOption {
+	return func(s *WallpaperService) {
+		s.outboxNotifier = n
+	}
+}
+
+// WithWallpaperFollowingFeed 注入关注流缓存，用于作者软删壁纸时顺带清理其发件箱。
+func WithWallpaperFollowingFeed(ff *cache.FollowingFeed) WallpaperOption {
+	return func(s *WallpaperService) {
+		s.followingFeed = ff
+	}
+}
+
 // WallpaperService 负责分类/标签直查、壁纸投稿软删、三级缓存详情以及冷热分离画廊列表。
 type WallpaperService struct {
 	metaRepo       *repository.MetaRepository
@@ -52,6 +76,8 @@ type WallpaperService struct {
 	userSvc        *UserService
 	wallpaperCache *cache.MultiLevel[model.WallpaperDetailCache]
 	latestFeed     *cache.LatestFeed
+	followingFeed  *cache.FollowingFeed
+	outboxNotifier OutboxNotifier
 	store          storage.StorageService
 }
 
@@ -63,8 +89,9 @@ func NewWallpaperService(
 	wallpaperCache *cache.MultiLevel[model.WallpaperDetailCache],
 	latestFeed *cache.LatestFeed,
 	store storage.StorageService,
+	opts ...WallpaperOption,
 ) *WallpaperService {
-	return &WallpaperService{
+	s := &WallpaperService{
 		metaRepo:       metaRepo,
 		wallpaperRepo:  wallpaperRepo,
 		userSvc:        userSvc,
@@ -72,6 +99,12 @@ func NewWallpaperService(
 		latestFeed:     latestFeed,
 		store:          store,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // ListCategories 直查全站预置壁纸分类列表。
@@ -169,7 +202,11 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		SizeBytes:   uint64(meta.SizeBytes),
 		Status:      model.WallpaperStatusActive,
 	}
-	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames, nil)
+	var buildOutbox func(*model.Wallpaper) (*model.OutboxEvent, error)
+	if s.outboxNotifier != nil {
+		buildOutbox = buildWallpaperPublishedOutbox
+	}
+	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames, buildOutbox)
 	if err != nil {
 		if errors.Is(err, repository.ErrDuplicateObjectKey) {
 			return nil, errno.ErrDuplicateObjectKey
@@ -177,9 +214,12 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	// 写库后联动缓存：清潜在空值穿透哨兵，并条件追加进最新流热窗口（失败仅告警不阻断投稿）。
+	// 写库后联动缓存并即时唤醒 OutboxRelay（缓存失败仅告警，绝不阻断投稿成功返回）。
 	s.invalidateDetailCache(ctx, wp.ID)
 	s.pushLatestFeed(ctx, wp.ID)
+	if s.outboxNotifier != nil {
+		s.outboxNotifier.Notify()
+	}
 
 	author, err := s.userSvc.GetAuthor(ctx, userID)
 	if err != nil {
@@ -237,9 +277,10 @@ func (s *WallpaperService) DeleteWallpaper(ctx context.Context, userID, wallpape
 		return errno.ErrInternal.Wrap(err)
 	}
 
-	// 软删后先删 L1 + sf.Forget 再删 L2，并从最新流热窗口移除（失败仅告警不回滚事务）。
+	// 软删后先删 L1 + sf.Forget 再删 L2，并从最新流与作者发件箱移除（失败仅告警不回滚事务）。
 	s.invalidateDetailCache(ctx, wallpaperID)
 	s.removeLatestFeed(ctx, wallpaperID)
+	s.removeFromAuthorOutbox(ctx, userID, wallpaperID)
 	return nil
 }
 
@@ -323,7 +364,7 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, nil)
+	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, nil, nil)
 }
 
 // ListUserWallpapers 返回指定创作者公开主页的已发布壁纸流（用户不存在返回 404/20003）。
@@ -352,7 +393,7 @@ func (s *WallpaperService) ListUserWallpapers(ctx context.Context, targetUserID 
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
-	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, &author)
+	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, &author, nil)
 }
 
 func (s *WallpaperService) getCachedDetail(ctx context.Context, wallpaperID uint64) (model.WallpaperDetailCache, error) {
@@ -434,6 +475,7 @@ func (s *WallpaperService) assembleSummaryPage(
 	nextCursor string,
 	hasMore bool,
 	fixedAuthor *model.WallpaperAuthor,
+	allowAuthor func(userID uint64) bool,
 ) (*response.PageData[model.WallpaperSummary], error) {
 	if len(pageIDs) == 0 {
 		page := response.NewPageData[model.WallpaperSummary](nil, nextCursor, hasMore)
@@ -472,7 +514,7 @@ func (s *WallpaperService) assembleSummaryPage(
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	// 按原序列保序过滤已软删/不存在的幽灵 ID，并收拢去重作者 ID。
+	// 按原序列保序过滤已软删/不存在的幽灵 ID（以及可选作者白名单），并收拢去重作者 ID。
 	ordered := make([]model.WallpaperDetailCache, 0, len(pageIDs))
 	var userIDs []uint64
 	if fixedAuthor == nil {
@@ -482,6 +524,9 @@ func (s *WallpaperService) assembleSummaryPage(
 	for _, id := range pageIDs {
 		d, ok := detailsMap[wallpaperDetailKey(id)]
 		if !ok {
+			continue
+		}
+		if allowAuthor != nil && !allowAuthor(d.UserID) {
 			continue
 		}
 		ordered = append(ordered, d)
@@ -569,6 +614,35 @@ func (s *WallpaperService) removeLatestFeed(ctx context.Context, wallpaperID uin
 			slog.Any("err", err),
 		)
 	}
+}
+
+func (s *WallpaperService) removeFromAuthorOutbox(ctx context.Context, authorID, wallpaperID uint64) {
+	if s.followingFeed == nil || authorID == 0 || wallpaperID == 0 {
+		return
+	}
+	if err := s.followingFeed.RemoveFromOutbox(ctx, authorID, wallpaperID); err != nil {
+		slog.WarnContext(ctx, "remove wallpaper from author outbox failed",
+			slog.Uint64("author_id", authorID),
+			slog.Uint64("wallpaper_id", wallpaperID),
+			slog.Any("err", err),
+		)
+	}
+}
+
+func buildWallpaperPublishedOutbox(wp *model.Wallpaper) (*model.OutboxEvent, error) {
+	evt := model.NewWallpaperPublishedEvent(wp.ID, wp.UserID, wp.CreatedAt)
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		return nil, err
+	}
+	return &model.OutboxEvent{
+		EventID:      evt.EventID,
+		ExchangeName: mq.ExchangeEvents,
+		RoutingKey:   mq.RoutingKeyWallpaperPublished,
+		Payload:      string(payload),
+		Status:       model.OutboxStatusPending,
+		NextRetryAt:  time.Now().UTC(),
+	}, nil
 }
 
 func (s *WallpaperService) fallbackAuthor(userID uint64) model.WallpaperAuthor {
