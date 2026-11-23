@@ -20,10 +20,9 @@ var (
 
 // FollowTxResult 描述一次关注或取关事务提交后的最新结果。
 type FollowTxResult struct {
-	Changed        bool
-	FollowerCount  int64
-	FollowingCount int64
-	IsBigV         bool
+	Changed       bool
+	FollowerCount int64
+	IsBigV        bool
 }
 
 // FollowRepository 封装 user_follows 与 user_follow_stats 的防死锁写事务与覆盖索引读查询。
@@ -79,10 +78,9 @@ func (r *FollowRepository) followOnce(
 			Take(&existingID).Error
 		if err == nil {
 			res = FollowTxResult{
-				Changed:        false,
-				FollowerCount:  int64(followeeStats.FollowerCount),
-				FollowingCount: int64(followerStats.FollowingCount),
-				IsBigV:         followeeStats.IsBigV == 1,
+				Changed:       false,
+				FollowerCount: int64(followeeStats.FollowerCount),
+				IsBigV:        followeeStats.IsBigV == 1,
 			}
 			return nil
 		}
@@ -101,10 +99,9 @@ func (r *FollowRepository) followOnce(
 		if err := tx.Create(&edge).Error; err != nil {
 			if isDuplicateKeyError(err) {
 				res = FollowTxResult{
-					Changed:        false,
-					FollowerCount:  int64(followeeStats.FollowerCount),
-					FollowingCount: int64(followerStats.FollowingCount),
-					IsBigV:         followeeStats.IsBigV == 1,
+					Changed:       false,
+					FollowerCount: int64(followeeStats.FollowerCount),
+					IsBigV:        followeeStats.IsBigV == 1,
 				}
 				return nil
 			}
@@ -123,10 +120,9 @@ func (r *FollowRepository) followOnce(
 		}
 
 		res = FollowTxResult{
-			Changed:        true,
-			FollowerCount:  int64(newFollower),
-			FollowingCount: int64(newFollowing),
-			IsBigV:         newIsBigV == 1,
+			Changed:       true,
+			FollowerCount: int64(newFollower),
+			IsBigV:        newIsBigV == 1,
 		}
 		return nil
 	})
@@ -194,10 +190,9 @@ func (r *FollowRepository) unfollowOnce(
 			Take(&existingID).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			res = FollowTxResult{
-				Changed:        false,
-				FollowerCount:  int64(followeeStats.FollowerCount),
-				FollowingCount: int64(followerStats.FollowingCount),
-				IsBigV:         followeeStats.IsBigV == 1,
+				Changed:       false,
+				FollowerCount: int64(followeeStats.FollowerCount),
+				IsBigV:        followeeStats.IsBigV == 1,
 			}
 			return nil
 		}
@@ -211,10 +206,9 @@ func (r *FollowRepository) unfollowOnce(
 		}
 		if del.RowsAffected == 0 {
 			res = FollowTxResult{
-				Changed:        false,
-				FollowerCount:  int64(followeeStats.FollowerCount),
-				FollowingCount: int64(followerStats.FollowingCount),
-				IsBigV:         followeeStats.IsBigV == 1,
+				Changed:       false,
+				FollowerCount: int64(followeeStats.FollowerCount),
+				IsBigV:        followeeStats.IsBigV == 1,
 			}
 			return nil
 		}
@@ -233,10 +227,9 @@ func (r *FollowRepository) unfollowOnce(
 		}
 
 		res = FollowTxResult{
-			Changed:        true,
-			FollowerCount:  int64(newFollower),
-			FollowingCount: int64(newFollowing),
-			IsBigV:         followeeStats.IsBigV == 1,
+			Changed:       true,
+			FollowerCount: int64(newFollower),
+			IsBigV:        followeeStats.IsBigV == 1,
 		}
 		return nil
 	})
