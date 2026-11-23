@@ -43,6 +43,12 @@ var (
 	ErrDuplicateObjectKey   = &Error{Code: 30004, HTTPStatus: http.StatusConflict, Msg: "该上传文件已发布，请勿重复提交"}
 )
 
+// 4xxxx：关注关系错误码（M4）。
+var (
+	ErrCannotFollowSelf   = &Error{Code: 40001, HTTPStatus: http.StatusBadRequest, Msg: "不能关注自己"}
+	ErrFollowLimitReached = &Error{Code: 40002, HTTPStatus: http.StatusBadRequest, Msg: "关注人数已达上限"}
+)
+
 // 5xxxx：游标与 Feed 基础错误码（供内部 cursor 工具复用）。
 var (
 	ErrInvalidCursor = &Error{Code: 50001, HTTPStatus: http.StatusBadRequest, Msg: "分页游标无效"}
