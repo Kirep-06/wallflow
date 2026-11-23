@@ -3,25 +3,26 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	"wallpaper-feed/internal/config"
 	"wallpaper-feed/internal/middleware"
 	"wallpaper-feed/internal/pkg/errno"
 	"wallpaper-feed/internal/pkg/response"
 	"wallpaper-feed/internal/service"
 )
 
-// RouterDeps 聚合路由注册所需的依赖。
+// RouterDeps 聚合路由注册所需的最小依赖。
 type RouterDeps struct {
-	Config      *config.Config
-	AuthService *service.AuthService
-	AuthHandler *AuthHandler
-	UserHandler *UserHandler
+	IsDev            bool
+	AuthService      *service.AuthService
+	AuthHandler      *AuthHandler
+	UserHandler      *UserHandler
+	MetaHandler      *MetaHandler
+	UploadHandler    *UploadHandler
+	WallpaperHandler *WallpaperHandler
 }
 
-// NewRouter 装配全局中间件与 M1 全部 8 个 HTTP 路由。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 + M2）。
 func NewRouter(deps RouterDeps) *gin.Engine {
-	isDev := deps.Config != nil && deps.Config.IsDev()
-	if isDev {
+	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
 	} else {
 		gin.SetMode(gin.ReleaseMode)
@@ -29,7 +30,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 
 	r := gin.New()
 	r.Use(middleware.Recovery(), middleware.RequestLog())
-	if isDev {
+	if deps.IsDev {
 		r.Use(middleware.CORS(true, nil))
 	}
 
@@ -37,7 +38,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		response.Fail(c, errno.ErrNotFound)
 	})
 
-	// 1. 存活探测
+	// 存活探测
 	r.GET("/healthz", func(c *gin.Context) {
 		response.OK(c, gin.H{"status": "ok"})
 	})
@@ -45,9 +46,9 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	authRequired := middleware.AuthRequired(deps.AuthService)
 	authOptional := middleware.AuthOptional(deps.AuthService)
 
-	// 2~8. M1 认证与用户路由
 	v1 := r.Group("/api/v1")
 	{
+		// M1: 认证与用户
 		auth := v1.Group("/auth")
 		{
 			auth.POST("/register", deps.AuthHandler.Register)
@@ -61,6 +62,17 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.GET("/me", authRequired, deps.UserHandler.GetMe)
 			users.PATCH("/me", authRequired, deps.UserHandler.PatchMe)
 			users.GET("/:id", authOptional, deps.UserHandler.GetPublicProfile)
+		}
+
+		// M2: 分类、标签、直传凭证与壁纸投稿管理
+		v1.GET("/categories", deps.MetaHandler.ListCategories)
+		v1.GET("/tags", deps.MetaHandler.ListTags)
+		v1.POST("/uploads/token", authRequired, deps.UploadHandler.CreateUploadToken)
+
+		wallpapers := v1.Group("/wallpapers")
+		{
+			wallpapers.POST("", authRequired, deps.WallpaperHandler.CreateWallpaper)
+			wallpapers.DELETE("/:id", authRequired, deps.WallpaperHandler.DeleteWallpaper)
 		}
 	}
 

@@ -88,16 +88,22 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	userRepo := repository.NewUserRepository(db)
 	sessionRepo := repository.NewAuthSessionRepository(rdb)
+	metaRepo := repository.NewMetaRepository(db)
 	wallpaperRepo := repository.NewWallpaperRepository(db)
 
 	userSvc := service.NewUserService(userRepo, wallpaperRepo, profileCache, store)
 	authSvc := service.NewAuthService(userRepo, sessionRepo, userSvc, jwtManager)
+	uploadSvc := service.NewUploadService(store)
+	wallpaperSvc := service.NewWallpaperService(metaRepo, wallpaperRepo, userSvc, store)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:      cfg,
-		AuthService: authSvc,
-		AuthHandler: handler.NewAuthHandler(authSvc),
-		UserHandler: handler.NewUserHandler(userSvc),
+		IsDev:            cfg.IsDev(),
+		AuthService:      authSvc,
+		AuthHandler:      handler.NewAuthHandler(authSvc),
+		UserHandler:      handler.NewUserHandler(userSvc),
+		MetaHandler:      handler.NewMetaHandler(wallpaperSvc),
+		UploadHandler:    handler.NewUploadHandler(uploadSvc),
+		WallpaperHandler: handler.NewWallpaperHandler(wallpaperSvc),
 	})
 
 	return &App{
