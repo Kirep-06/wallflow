@@ -11,18 +11,19 @@ import (
 
 // RouterDeps 聚合路由注册所需的最小依赖。
 type RouterDeps struct {
-	IsDev            bool
-	AuthService      *service.AuthService
-	AuthHandler      *AuthHandler
-	UserHandler      *UserHandler
-	FollowHandler    *FollowHandler
-	FeedHandler      *FeedHandler
-	MetaHandler      *MetaHandler
-	UploadHandler    *UploadHandler
-	WallpaperHandler *WallpaperHandler
+	IsDev              bool
+	AuthService        *service.AuthService
+	AuthHandler        *AuthHandler
+	UserHandler        *UserHandler
+	FollowHandler      *FollowHandler
+	FeedHandler        *FeedHandler
+	MetaHandler        *MetaHandler
+	UploadHandler      *UploadHandler
+	WallpaperHandler   *WallpaperHandler
+	InteractionHandler *InteractionHandler
 }
 
-// NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M5）。
+// NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M6）。
 func NewRouter(deps RouterDeps) *gin.Engine {
 	if deps.IsDev {
 		gin.SetMode(gin.DebugMode)
@@ -63,6 +64,8 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		{
 			users.GET("/me", authRequired, deps.UserHandler.GetMe)
 			users.PATCH("/me", authRequired, deps.UserHandler.PatchMe)
+			users.GET("/me/favorites", authRequired, deps.InteractionHandler.ListMyFavorites)
+			users.GET("/me/likes", authRequired, deps.InteractionHandler.ListMyLikes)
 			users.GET("/:id", authOptional, deps.UserHandler.GetPublicProfile)
 			users.GET("/:id/wallpapers", authOptional, deps.WallpaperHandler.ListUserWallpapers)
 			users.POST("/:id/follow", authRequired, deps.FollowHandler.Follow)
@@ -71,7 +74,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.GET("/:id/followers", authOptional, deps.FollowHandler.ListFollowers)
 		}
 
-		// M2 + M3: 分类、标签、直传凭证与壁纸画廊/投稿管理
+		// M2 + M3 + M6: 分类、标签、直传凭证、壁纸画廊与互动
 		v1.GET("/categories", deps.MetaHandler.ListCategories)
 		v1.GET("/tags", deps.MetaHandler.ListTags)
 		v1.POST("/uploads/token", authRequired, deps.UploadHandler.CreateUploadToken)
@@ -82,7 +85,17 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			wallpapers.GET("/:id", authOptional, deps.WallpaperHandler.GetWallpaperDetail)
 			wallpapers.POST("", authRequired, deps.WallpaperHandler.CreateWallpaper)
 			wallpapers.DELETE("/:id", authRequired, deps.WallpaperHandler.DeleteWallpaper)
+			wallpapers.POST("/:id/like", authRequired, deps.InteractionHandler.Like)
+			wallpapers.DELETE("/:id/like", authRequired, deps.InteractionHandler.Unlike)
+			wallpapers.POST("/:id/favorite", authRequired, deps.InteractionHandler.Favorite)
+			wallpapers.DELETE("/:id/favorite", authRequired, deps.InteractionHandler.Unfavorite)
+			wallpapers.POST("/:id/download", authOptional, deps.InteractionHandler.RecordDownload)
+			wallpapers.GET("/:id/comments", authOptional, deps.InteractionHandler.ListComments)
+			wallpapers.POST("/:id/comments", authRequired, deps.InteractionHandler.CreateComment)
 		}
+
+		// M6: 一级评论管理
+		v1.DELETE("/comments/:id", authRequired, deps.InteractionHandler.DeleteComment)
 
 		// M5: 推拉结合关注流
 		v1.GET("/feed/following", authRequired, deps.FeedHandler.ListFollowingFeed)

@@ -35,6 +35,8 @@ const (
 	userProfileL2TTL         = 30 * time.Minute
 	wallpaperDetailL1TTL     = 30 * time.Second
 	wallpaperDetailColdL2TTL = 10 * time.Minute
+	wallpaperStatsL1TTL      = 10 * time.Second
+	wallpaperStatsL2TTL      = 10 * time.Minute
 	followStatsL1TTL         = 15 * time.Second
 	followStatsL2TTL         = 10 * time.Minute
 	followingIDsL1TTL        = 15 * time.Second
@@ -99,6 +101,9 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		l1, rdb, wallpaperDetailL1TTL, wallpaperDetailColdL2TTL,
 		cache.WithL2TTLFunc(service.WallpaperDetailL2TTL),
 	)
+	wallpaperStatsCache := cache.NewMultiLevel[model.WallpaperStatsCache](
+		l1, rdb, wallpaperStatsL1TTL, wallpaperStatsL2TTL,
+	)
 	followStatsCache := cache.NewMultiLevel[model.FollowStatsCache](
 		l1, rdb, followStatsL1TTL, followStatsL2TTL,
 	)
@@ -114,14 +119,17 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	metaRepo := repository.NewMetaRepository(db)
 	wallpaperRepo := repository.NewWallpaperRepository(db)
 	followRepo := repository.NewFollowRepository(db)
+	interactionRepo := repository.NewInteractionRepository(db)
 
 	var (
 		mqClient    *mq.Client
 		outboxRelay *worker.OutboxRelay
+		lightPub    mq.LightPublisher
 	)
 	if cfg.RabbitMQ.Enabled {
 		mqClient = mq.NewClient(cfg.RabbitMQ)
 		outboxRelay = worker.NewOutboxRelay(repository.NewOutboxRepository(db), mqClient)
+		lightPub = mqClient
 	}
 
 	userSvc := service.NewUserService(service.UserServiceDeps{
@@ -138,6 +146,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	wpOpts := []service.WallpaperOption{
 		service.WithWallpaperFollowingFeed(followingFeed),
+		service.WithWallpaperInteraction(interactionRepo, wallpaperStatsCache),
 	}
 	if outboxRelay != nil {
 		wpOpts = append(wpOpts, service.WithOutboxNotifier(outboxRelay))
@@ -158,17 +167,19 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		FollowingFeed:     followingFeed,
 		WallpaperSvc:      wallpaperSvc,
 	})
+	interactionSvc := service.NewInteractionService(interactionRepo, wallpaperSvc, userSvc, lightPub)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		IsDev:            cfg.IsDev(),
-		AuthService:      authSvc,
-		AuthHandler:      handler.NewAuthHandler(authSvc),
-		UserHandler:      handler.NewUserHandler(userSvc),
-		FollowHandler:    handler.NewFollowHandler(followSvc),
-		FeedHandler:      handler.NewFeedHandler(feedSvc),
-		MetaHandler:      handler.NewMetaHandler(wallpaperSvc),
-		UploadHandler:    handler.NewUploadHandler(uploadSvc),
-		WallpaperHandler: handler.NewWallpaperHandler(wallpaperSvc),
+		IsDev:              cfg.IsDev(),
+		AuthService:        authSvc,
+		AuthHandler:        handler.NewAuthHandler(authSvc),
+		UserHandler:        handler.NewUserHandler(userSvc),
+		FollowHandler:      handler.NewFollowHandler(followSvc),
+		FeedHandler:        handler.NewFeedHandler(feedSvc),
+		MetaHandler:        handler.NewMetaHandler(wallpaperSvc),
+		UploadHandler:      handler.NewUploadHandler(uploadSvc),
+		WallpaperHandler:   handler.NewWallpaperHandler(wallpaperSvc),
+		InteractionHandler: handler.NewInteractionHandler(interactionSvc),
 	})
 
 	return &App{
