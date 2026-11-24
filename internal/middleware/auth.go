@@ -89,6 +89,21 @@ func GetSessionID(c *gin.Context) string {
 	return sid
 }
 
+// AdminRequired 管理员白名单鉴权中间件（需置于 AuthRequired 之后）。
+func AdminRequired(adminSvc *service.AdminMetaService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if adminSvc == nil {
+			response.AbortWithError(c, errno.ErrForbidden.WithMessage("管理后台未启用"))
+			return
+		}
+		if _, err := adminSvc.RequireAdmin(c.Request.Context(), GetUserID(c)); err != nil {
+			response.AbortWithError(c, err)
+			return
+		}
+		c.Next()
+	}
+}
+
 func extractSingleBearerHeader(c *gin.Context) (string, bool) {
 	headers := c.Request.Header.Values("Authorization")
 	if len(headers) != 1 {

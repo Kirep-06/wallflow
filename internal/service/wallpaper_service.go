@@ -144,7 +144,7 @@ func (s *WallpaperService) ListCategories(ctx context.Context) (*model.CategoryL
 	}
 	items := make([]model.CategoryItem, 0, len(cats))
 	for i := range cats {
-		items = append(items, cats[i].ToItem())
+		items = append(items, cats[i].ToItem(s.store.BuildRawURL(cats[i].IconKey)))
 	}
 	return &model.CategoryList{Items: items}, nil
 }
@@ -171,7 +171,7 @@ func (s *WallpaperService) ListTags(ctx context.Context, rawQuery string, limit 
 
 	items := make([]model.TagItem, 0, len(tags))
 	for i := range tags {
-		items = append(items, tags[i].ToItem())
+		items = append(items, tags[i].ToItem(s.store.BuildRawURL(tags[i].IconKey)))
 	}
 	return &model.TagList{Items: items}, nil
 }

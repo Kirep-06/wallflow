@@ -21,6 +21,8 @@ type RouterDeps struct {
 	UploadHandler      *UploadHandler
 	WallpaperHandler   *WallpaperHandler
 	InteractionHandler *InteractionHandler
+	AdminMetaService   *service.AdminMetaService
+	AdminMetaHandler   *AdminMetaHandler
 }
 
 // NewRouter 装配全局中间件与全部 HTTP 路由（M1 ~ M7）。
@@ -100,6 +102,22 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		// M5 / M7: 推拉结合关注流与全站热门榜
 		v1.GET("/feed/following", authRequired, deps.FeedHandler.ListFollowingFeed)
 		v1.GET("/feed/hot", authOptional, deps.FeedHandler.ListHotFeed)
+
+		// 管理后台：分类与话题（标签）管理（白名单管理员鉴权）
+		if deps.AdminMetaHandler != nil {
+			admin := v1.Group("/admin", authRequired, middleware.AdminRequired(deps.AdminMetaService))
+			{
+				admin.GET("/me", deps.AdminMetaHandler.GetMe)
+				admin.GET("/categories", deps.AdminMetaHandler.ListCategories)
+				admin.POST("/categories", deps.AdminMetaHandler.CreateCategory)
+				admin.PATCH("/categories/:id", deps.AdminMetaHandler.UpdateCategory)
+				admin.DELETE("/categories/:id", deps.AdminMetaHandler.DeleteCategory)
+				admin.GET("/tags", deps.AdminMetaHandler.ListTags)
+				admin.POST("/tags", deps.AdminMetaHandler.CreateTag)
+				admin.PATCH("/tags/:id", deps.AdminMetaHandler.UpdateTag)
+				admin.DELETE("/tags/:id", deps.AdminMetaHandler.DeleteTag)
+			}
+		}
 	}
 
 	return r

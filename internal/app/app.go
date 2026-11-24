@@ -171,6 +171,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		WallpaperSvc:      wallpaperSvc,
 	})
 	interactionSvc := service.NewInteractionService(interactionRepo, wallpaperSvc, userSvc, lightPub)
+	adminMetaSvc := service.NewAdminMetaService(cfg.Admin, userRepo, metaRepo, wallpaperCache, store)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		IsDev:              cfg.IsDev(),
@@ -183,6 +184,8 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		UploadHandler:      handler.NewUploadHandler(uploadSvc),
 		WallpaperHandler:   handler.NewWallpaperHandler(wallpaperSvc),
 		InteractionHandler: handler.NewInteractionHandler(interactionSvc),
+		AdminMetaService:   adminMetaSvc,
+		AdminMetaHandler:   handler.NewAdminMetaHandler(adminMetaSvc),
 	})
 
 	return &App{

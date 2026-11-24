@@ -16,6 +16,8 @@ const (
 	wallpaperMaxAspect           = 4.0
 	avatarMinEdge         uint32 = 100
 	avatarMaxEdge         uint32 = 4096
+	iconMinEdge           uint32 = 32
+	iconMaxEdge           uint32 = 2048
 )
 
 // UploadService 负责七牛客户端直传凭证签发。
@@ -33,7 +35,7 @@ func (s *UploadService) CreateUploadToken(ctx context.Context, userID uint64, re
 	scene := storage.UploadScene(strings.TrimSpace(req.Scene))
 	maxBytes, ok := storage.MaxBytesForScene(scene)
 	if !ok {
-		return nil, errno.ErrInvalidParam.WithMessage("上传场景仅支持 wallpaper 或 avatar")
+		return nil, errno.ErrInvalidParam.WithMessage("上传场景仅支持 wallpaper、avatar 或 icon")
 	}
 
 	contentType := strings.ToLower(strings.TrimSpace(req.ContentType))
@@ -110,6 +112,18 @@ func verifyAvatarObject(ctx context.Context, store storage.StorageService, userI
 
 	if meta.Width < avatarMinEdge || meta.Width > avatarMaxEdge || meta.Height < avatarMinEdge || meta.Height > avatarMaxEdge {
 		return errno.ErrUploadVerifyFailed.WithMessage("头像分辨率需在 100x100 至 4096x4096 之间")
+	}
+	return nil
+}
+
+func verifyIconObject(ctx context.Context, store storage.StorageService, userID uint64, objectKey string) error {
+	meta, err := verifyUploadedImage(ctx, store, storage.SceneIcon, userID, objectKey)
+	if err != nil {
+		return err
+	}
+
+	if meta.Width < iconMinEdge || meta.Width > iconMaxEdge || meta.Height < iconMinEdge || meta.Height > iconMaxEdge {
+		return errno.ErrUploadVerifyFailed.WithMessage("图标分辨率需在 32x32 至 2048x2048 之间")
 	}
 	return nil
 }
