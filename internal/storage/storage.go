@@ -21,9 +21,11 @@ type UploadScene string
 const (
 	SceneWallpaper UploadScene = "wallpaper"
 	SceneAvatar    UploadScene = "avatar"
+	SceneIcon      UploadScene = "icon"
 
 	WallpaperMaxBytes int64 = 20 << 20 // 20 MiB
 	AvatarMaxBytes    int64 = 5 << 20  // 5 MiB
+	IconMaxBytes      int64 = 2 << 20  // 2 MiB
 	MaxObjectKeyLen         = 255
 
 	uploadTokenTTL    = 10 * time.Minute
@@ -107,6 +109,8 @@ func MaxBytesForScene(scene UploadScene) (int64, bool) {
 		return WallpaperMaxBytes, true
 	case SceneAvatar:
 		return AvatarMaxBytes, true
+	case SceneIcon:
+		return IconMaxBytes, true
 	default:
 		return 0, false
 	}
@@ -142,6 +146,8 @@ func sceneKeyPrefix(scene UploadScene, userID uint64) (string, bool) {
 		return "wallpapers/" + strconv.FormatUint(userID, 10) + "/", true
 	case SceneAvatar:
 		return "avatars/" + strconv.FormatUint(userID, 10) + "/", true
+	case SceneIcon:
+		return "icons/" + strconv.FormatUint(userID, 10) + "/", true
 	default:
 		return "", false
 	}

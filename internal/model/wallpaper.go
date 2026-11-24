@@ -17,6 +17,7 @@ type Category struct {
 	Slug      string    `gorm:"type:varchar(32);not null;uniqueIndex:uk_slug"`
 	Name      string    `gorm:"type:varchar(32);not null"`
 	SortNo    int       `gorm:"not null;default:0"`
+	IconKey   string    `gorm:"type:varchar(255);not null;default:''"`
 	CreatedAt time.Time `gorm:"autoCreateTime"`
 }
 
@@ -25,13 +26,18 @@ func (Category) TableName() string {
 	return "categories"
 }
 
-// ToItem 将分类实体转换为接口响应项。
-func (c *Category) ToItem() CategoryItem {
+// ToItem 将分类实体转换为接口响应项（iconURL 由服务层拼装后传入）。
+func (c *Category) ToItem(iconURL ...string) CategoryItem {
+	url := ""
+	if len(iconURL) > 0 {
+		url = iconURL[0]
+	}
 	return CategoryItem{
-		ID:     c.ID,
-		Slug:   c.Slug,
-		Name:   c.Name,
-		SortNo: c.SortNo,
+		ID:      c.ID,
+		Slug:    c.Slug,
+		Name:    c.Name,
+		SortNo:  c.SortNo,
+		IconURL: url,
 	}
 }
 
@@ -40,6 +46,7 @@ type Tag struct {
 	ID        uint64    `gorm:"primaryKey;autoIncrement"`
 	Name      string    `gorm:"type:varchar(24);not null;uniqueIndex:uk_name"`
 	UseCount  uint64    `gorm:"not null;default:0"`
+	IconKey   string    `gorm:"type:varchar(255);not null;default:''"`
 	CreatedAt time.Time `gorm:"autoCreateTime"`
 }
 
@@ -48,12 +55,17 @@ func (Tag) TableName() string {
 	return "tags"
 }
 
-// ToItem 将标签实体转换为接口响应项。
-func (t *Tag) ToItem() TagItem {
+// ToItem 将标签实体转换为接口响应项（iconURL 由服务层拼装后传入）。
+func (t *Tag) ToItem(iconURL ...string) TagItem {
+	url := ""
+	if len(iconURL) > 0 {
+		url = iconURL[0]
+	}
 	return TagItem{
 		ID:       t.ID,
 		Name:     t.Name,
 		UseCount: t.UseCount,
+		IconURL:  url,
 	}
 }
 
@@ -147,10 +159,11 @@ func Is4KResolution(width, height uint32) bool {
 
 // CategoryItem 为壁纸分类响应项。
 type CategoryItem struct {
-	ID     uint64 `json:"id,string"`
-	Slug   string `json:"slug"`
-	Name   string `json:"name"`
-	SortNo int    `json:"sort_no"`
+	ID      uint64 `json:"id,string"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+	SortNo  int    `json:"sort_no"`
+	IconURL string `json:"icon_url,omitempty"`
 }
 
 // CategoryList 为全站分类列表响应结构。
@@ -163,11 +176,51 @@ type TagItem struct {
 	ID       uint64 `json:"id,string"`
 	Name     string `json:"name"`
 	UseCount uint64 `json:"use_count"`
+	IconURL  string `json:"icon_url,omitempty"`
 }
 
 // TagList 为热门或联想标签列表响应结构。
 type TagList struct {
 	Items []TagItem `json:"items"`
+}
+
+// AdminCategoryItem 为后台管理分类列表项（附带该分类下正常壁纸计数）。
+type AdminCategoryItem struct {
+	CategoryItem
+	WallpaperCount uint64 `json:"wallpaper_count"`
+}
+
+// AdminCategoryList 为后台管理分类列表响应。
+type AdminCategoryList struct {
+	Items []AdminCategoryItem `json:"items"`
+}
+
+// AdminCreateCategoryRequest 为后台新建分类请求体。
+type AdminCreateCategoryRequest struct {
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+	SortNo  int    `json:"sort_no"`
+	IconKey string `json:"icon_key"`
+}
+
+// AdminUpdateCategoryRequest 为后台编辑分类请求体（指针区分未传与空值）。
+type AdminUpdateCategoryRequest struct {
+	Slug    *string `json:"slug"`
+	Name    *string `json:"name"`
+	SortNo  *int    `json:"sort_no"`
+	IconKey *string `json:"icon_key"`
+}
+
+// AdminCreateTagRequest 为后台新建话题/标签请求体。
+type AdminCreateTagRequest struct {
+	Name    string `json:"name"`
+	IconKey string `json:"icon_key"`
+}
+
+// AdminUpdateTagRequest 为后台编辑话题/标签请求体。
+type AdminUpdateTagRequest struct {
+	Name    *string `json:"name"`
+	IconKey *string `json:"icon_key"`
 }
 
 // UploadTokenRequest 为获取直传凭证请求体。

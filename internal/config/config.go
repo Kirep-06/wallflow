@@ -18,6 +18,7 @@ const (
 	EnvQiniuAccessKey    = "WF_STORAGE_QINIU_ACCESS_KEY"
 	EnvQiniuSecretKey    = "WF_STORAGE_QINIU_SECRET_KEY"
 	EnvRabbitMQPassword  = "WF_RABBITMQ_PASSWORD"
+	EnvAdminUsernames    = "WF_ADMIN_USERNAMES"
 	MinJWTSecretLen      = 32
 	StorageProviderNoop  = "noop"
 	StorageProviderQiniu = "qiniu"
@@ -41,7 +42,27 @@ type Config struct {
 	Redis     RedisConfig    `mapstructure:"redis"`
 	RabbitMQ  RabbitMQConfig `mapstructure:"rabbitmq"`
 	Storage   StorageConfig  `mapstructure:"storage"`
+	Admin     AdminConfig    `mapstructure:"admin"`
 	JWTSecret string         `mapstructure:"-"`
+}
+
+// AdminConfig 为管理后台白名单配置（支持 WF_ADMIN_USERNAMES 逗号分隔覆盖）。
+type AdminConfig struct {
+	Usernames []string `mapstructure:"usernames"`
+}
+
+// IsAdminUsername 判断给定用户名是否在管理员白名单内（忽略大小写）。
+func (a AdminConfig) IsAdminUsername(username string) bool {
+	target := strings.ToLower(strings.TrimSpace(username))
+	if target == "" {
+		return false
+	}
+	for _, u := range a.Usernames {
+		if u == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ServerConfig 为 HTTP 服务运行配置。
@@ -121,7 +142,29 @@ func Load(path string) (*Config, error) {
 	if err := normalizeAndValidateRabbitMQ(&cfg.RabbitMQ); err != nil {
 		return nil, err
 	}
+	normalizeAdmin(&cfg.Admin)
 	return &cfg, nil
+}
+
+func normalizeAdmin(a *AdminConfig) {
+	raw := a.Usernames
+	if envVal, ok := os.LookupEnv(EnvAdminUsernames); ok && strings.TrimSpace(envVal) != "" {
+		raw = strings.Split(envVal, ",")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		name := strings.ToLower(strings.TrimSpace(item))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	a.Usernames = out
 }
 
 func normalizeAndValidateRabbitMQ(r *RabbitMQConfig) error {
