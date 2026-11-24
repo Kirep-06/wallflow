@@ -106,6 +106,51 @@ func (WallpaperTag) TableName() string {
 	return "wallpaper_tags"
 }
 
+// WallpaperImage 对应 MySQL wallpaper_images 一帖多图子表实体。
+type WallpaperImage struct {
+	ID          uint64    `gorm:"primaryKey;autoIncrement"`
+	WallpaperID uint64    `gorm:"not null"`
+	SortNo      uint32    `gorm:"not null;default:0"`
+	ObjectKey   string    `gorm:"type:varchar(255);not null;uniqueIndex:uk_object_key"`
+	Width       uint32    `gorm:"not null"`
+	Height      uint32    `gorm:"not null"`
+	Orientation uint8     `gorm:"not null"`
+	Is4K        uint8     `gorm:"column:is_4k;not null;default:0"`
+	SizeBytes   uint64    `gorm:"not null"`
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
+}
+
+// TableName 指定 GORM 表名。
+func (WallpaperImage) TableName() string {
+	return "wallpaper_images"
+}
+
+// WallpaperImageCache 为三级缓存中单张壁纸图片的精简快照结构（仅存相对 object_key）。
+type WallpaperImageCache struct {
+	ID          uint64 `json:"id,string"`
+	SortNo      uint32 `json:"sort_no"`
+	ObjectKey   string `json:"object_key"`
+	Width       uint32 `json:"width"`
+	Height      uint32 `json:"height"`
+	Orientation uint8  `json:"orientation"`
+	Is4K        bool   `json:"is_4k"`
+	SizeBytes   uint64 `json:"size_bytes"`
+}
+
+// WallpaperImageItem 为接口响应中的单张壁纸图片结构。
+type WallpaperImageItem struct {
+	ID          uint64 `json:"id,string"`
+	SortNo      uint32 `json:"sort_no"`
+	ThumbURL    string `json:"thumb_url"`
+	RawURL      string `json:"raw_url"`
+	Width       uint32 `json:"width"`
+	Height      uint32 `json:"height"`
+	Orientation uint8  `json:"orientation"`
+	Is4K        bool   `json:"is_4k"`
+	SizeBytes   uint64 `json:"size_bytes"`
+	Mime        string `json:"mime"`
+}
+
 // WallpaperOwnerRecord 为软删鉴权查询的轻量投影结构。
 type WallpaperOwnerRecord struct {
 	ID     uint64
@@ -128,9 +173,10 @@ type WallpaperDetailCache struct {
 	Orientation uint8        `json:"orientation"`
 	Is4K        bool         `json:"is_4k"`
 	SizeBytes   uint64       `json:"size_bytes"`
-	Category    CategoryItem `json:"category"`
-	Tags        []TagItem    `json:"tags"`
-	CreatedAt   time.Time    `json:"created_at"`
+	Category    CategoryItem          `json:"category"`
+	Tags        []TagItem             `json:"tags"`
+	Images      []WallpaperImageCache `json:"images,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
 }
 
 // WallpaperListQuery 为发现页画廊列表与分类/标签单维互斥筛选查询参数。
@@ -253,13 +299,14 @@ type UploadTokenResult struct {
 	MaxSizeBytes int64  `json:"max_size_bytes"`
 }
 
-// CreateWallpaperRequest 为投稿发布壁纸请求体。
+// CreateWallpaperRequest 为投稿发布壁纸请求体（支持 object_keys 1-9 张多图，兼容旧 object_key 单图）。
 type CreateWallpaperRequest struct {
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	CategoryID  string   `json:"category_id"`
 	Tags        []string `json:"tags"`
 	ObjectKey   string   `json:"object_key"`
+	ObjectKeys  []string `json:"object_keys"`
 }
 
 // WallpaperAuthor 为壁纸详情内嵌作者信息。
@@ -289,28 +336,31 @@ type WallpaperDetail struct {
 	CommentCount  uint64          `json:"comment_count"`
 	IsLiked       bool            `json:"is_liked"`
 	IsFavorited   bool            `json:"is_favorited"`
-	Category      CategoryItem    `json:"category"`
-	Tags          []TagItem       `json:"tags"`
-	Author        WallpaperAuthor `json:"author"`
-	CreatedAt     time.Time       `json:"created_at"`
+	Category      CategoryItem         `json:"category"`
+	Tags          []TagItem            `json:"tags"`
+	Images        []WallpaperImageItem `json:"images"`
+	Author        WallpaperAuthor      `json:"author"`
+	CreatedAt     time.Time            `json:"created_at"`
 }
 
-// WallpaperSummary 为壁纸瀑布流卡片摘要响应结构。
+// WallpaperSummary 为壁纸帖子卡片摘要响应结构。
 type WallpaperSummary struct {
-	ID            uint64          `json:"id,string"`
-	Title         string          `json:"title"`
-	ThumbURL      string          `json:"thumb_url"`
-	Width         uint32          `json:"width"`
-	Height        uint32          `json:"height"`
-	Orientation   uint8           `json:"orientation"`
-	Is4K          bool            `json:"is_4k"`
-	LikeCount     uint64          `json:"like_count"`
-	FavCount      uint64          `json:"fav_count"`
-	DownloadCount uint64          `json:"download_count"`
-	CommentCount  uint64          `json:"comment_count"`
-	IsLiked       bool            `json:"is_liked"`
-	IsFavorited   bool            `json:"is_favorited"`
-	Category      CategoryItem    `json:"category"`
-	Author        WallpaperAuthor `json:"author"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID            uint64               `json:"id,string"`
+	Title         string               `json:"title"`
+	Description   string               `json:"description,omitempty"`
+	ThumbURL      string               `json:"thumb_url"`
+	Width         uint32               `json:"width"`
+	Height        uint32               `json:"height"`
+	Orientation   uint8                `json:"orientation"`
+	Is4K          bool                 `json:"is_4k"`
+	LikeCount     uint64               `json:"like_count"`
+	FavCount      uint64               `json:"fav_count"`
+	DownloadCount uint64               `json:"download_count"`
+	CommentCount  uint64               `json:"comment_count"`
+	IsLiked       bool                 `json:"is_liked"`
+	IsFavorited   bool                 `json:"is_favorited"`
+	Category      CategoryItem         `json:"category"`
+	Images        []WallpaperImageItem `json:"images"`
+	Author        WallpaperAuthor      `json:"author"`
+	CreatedAt     time.Time            `json:"created_at"`
 }

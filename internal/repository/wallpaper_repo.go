@@ -27,11 +27,31 @@ func NewWallpaperRepository(db *gorm.DB) *WallpaperRepository {
 	return &WallpaperRepository{db: db}
 }
 
-// CreateWithTags 在单次短事务内写入壁纸、按需建标签递增计数（按 tag_id 升序防死锁），
-// 当 buildOutbox 非空时在同一本地事务内写入 outbox_events 实现 Transactional Outbox。
+// CreateWithTags 保持向后兼容的单图投稿入口。
 func (r *WallpaperRepository) CreateWithTags(
 	ctx context.Context,
 	wp *model.Wallpaper,
+	tagNames []string,
+	buildOutbox func(*model.Wallpaper) (*model.OutboxEvent, error),
+) ([]model.Tag, error) {
+	defaultImg := model.WallpaperImage{
+		SortNo:      0,
+		ObjectKey:   wp.ObjectKey,
+		Width:       wp.Width,
+		Height:      wp.Height,
+		Orientation: wp.Orientation,
+		Is4K:        wp.Is4K,
+		SizeBytes:   wp.SizeBytes,
+	}
+	return r.CreateWithTagsAndImages(ctx, wp, []model.WallpaperImage{defaultImg}, tagNames, buildOutbox)
+}
+
+// CreateWithTagsAndImages 在单次短事务内写入壁纸主表、多图子表（wallpaper_images）、按需建标签递增计数，
+// 当 buildOutbox 非空时在同一本地事务内写入 outbox_events 实现 Transactional Outbox。
+func (r *WallpaperRepository) CreateWithTagsAndImages(
+	ctx context.Context,
+	wp *model.Wallpaper,
+	images []model.WallpaperImage,
 	tagNames []string,
 	buildOutbox func(*model.Wallpaper) (*model.OutboxEvent, error),
 ) ([]model.Tag, error) {
@@ -42,6 +62,19 @@ func (r *WallpaperRepository) CreateWithTags(
 				return ErrDuplicateObjectKey
 			}
 			return fmt.Errorf("wallpaper repo create: %w", err)
+		}
+
+		if len(images) > 0 {
+			for i := range images {
+				images[i].WallpaperID = wp.ID
+				images[i].SortNo = uint32(i)
+			}
+			if err := tx.Create(&images).Error; err != nil {
+				if isDuplicateKeyError(err) {
+					return ErrDuplicateObjectKey
+				}
+				return fmt.Errorf("wallpaper repo create images: %w", err)
+			}
 		}
 
 		if len(tagNames) > 0 {
@@ -253,12 +286,48 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 		})
 	}
 
+	var imgRows []model.WallpaperImage
+	if err := r.db.WithContext(ctx).
+		Where("wallpaper_id IN ?", wpIDs).
+		Order("wallpaper_id ASC, sort_no ASC, id ASC").
+		Find(&imgRows).Error; err != nil {
+		return nil, fmt.Errorf("wallpaper repo find images by wallpaper ids: %w", err)
+	}
+	imgsByWP := make(map[uint64][]model.WallpaperImageCache, len(wps))
+	for _, img := range imgRows {
+		imgsByWP[img.WallpaperID] = append(imgsByWP[img.WallpaperID], model.WallpaperImageCache{
+			ID:          img.ID,
+			SortNo:      img.SortNo,
+			ObjectKey:   img.ObjectKey,
+			Width:       img.Width,
+			Height:      img.Height,
+			Orientation: img.Orientation,
+			Is4K:        img.Is4K == 1,
+			SizeBytes:   img.SizeBytes,
+		})
+	}
+
 	result := make(map[uint64]model.WallpaperDetailCache, len(wps))
 	for i := range wps {
 		w := wps[i]
 		tags := tagsByWP[w.ID]
 		if tags == nil {
 			tags = []model.TagItem{}
+		}
+		imgs := imgsByWP[w.ID]
+		if len(imgs) == 0 {
+			imgs = []model.WallpaperImageCache{
+				{
+					ID:          w.ID,
+					SortNo:      0,
+					ObjectKey:   w.ObjectKey,
+					Width:       w.Width,
+					Height:      w.Height,
+					Orientation: w.Orientation,
+					Is4K:        w.Is4K == 1,
+					SizeBytes:   w.SizeBytes,
+				},
+			}
 		}
 		result[w.ID] = model.WallpaperDetailCache{
 			ID:          w.ID,
@@ -274,6 +343,7 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 			SizeBytes:   w.SizeBytes,
 			Category:    catByID[w.CategoryID],
 			Tags:        tags,
+			Images:      imgs,
 			CreatedAt:   w.CreatedAt.UTC(),
 		}
 	}

@@ -220,8 +220,10 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 	if err != nil {
 		return nil, err
 	}
-	if !storage.ValidateObjectKey(storage.SceneWallpaper, userID, req.ObjectKey) {
-		return nil, errno.ErrInvalidParam.WithMessage("object_key 不合法或无权使用")
+
+	objectKeys, err := normalizePostObjectKeys(req.ObjectKeys, req.ObjectKey, userID)
+	if err != nil {
+		return nil, err
 	}
 
 	category, err := s.metaRepo.FindCategoryByID(ctx, categoryID)
@@ -232,41 +234,69 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 
-	meta, err := verifyWallpaperObject(ctx, s.store, userID, req.ObjectKey)
-	if err != nil {
-		return nil, err
+	imageModels := make([]model.WallpaperImage, 0, len(objectKeys))
+	imageItems := make([]model.WallpaperImageItem, 0, len(objectKeys))
+	for idx, key := range objectKeys {
+		meta, verifyErr := verifyWallpaperObject(ctx, s.store, userID, key)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		orient := model.CalcOrientation(meta.Width, meta.Height)
+		is4K := model.Is4KResolution(meta.Width, meta.Height)
+		var is4KFlag uint8
+		if is4K {
+			is4KFlag = 1
+		}
+		imageModels = append(imageModels, model.WallpaperImage{
+			SortNo:      uint32(idx),
+			ObjectKey:   key,
+			Width:       meta.Width,
+			Height:      meta.Height,
+			Orientation: orient,
+			Is4K:        is4KFlag,
+			SizeBytes:   uint64(meta.SizeBytes),
+		})
+		mime, _ := storage.MimeFromObjectKey(key)
+		imageItems = append(imageItems, model.WallpaperImageItem{
+			SortNo:      uint32(idx),
+			ThumbURL:    s.store.BuildThumbURL(key),
+			RawURL:      s.store.BuildRawURL(key),
+			Width:       meta.Width,
+			Height:      meta.Height,
+			Orientation: orient,
+			Is4K:        is4K,
+			SizeBytes:   uint64(meta.SizeBytes),
+			Mime:        mime,
+		})
 	}
 
-	orientation := model.CalcOrientation(meta.Width, meta.Height)
-	is4K := model.Is4KResolution(meta.Width, meta.Height)
-	var is4KFlag uint8
-	if is4K {
-		is4KFlag = 1
-	}
-
+	cover := imageModels[0]
 	wp := &model.Wallpaper{
 		UserID:      userID,
 		CategoryID:  category.ID,
 		Title:       title,
 		Description: desc,
-		ObjectKey:   req.ObjectKey,
-		Width:       meta.Width,
-		Height:      meta.Height,
-		Orientation: orientation,
-		Is4K:        is4KFlag,
-		SizeBytes:   uint64(meta.SizeBytes),
+		ObjectKey:   cover.ObjectKey,
+		Width:       cover.Width,
+		Height:      cover.Height,
+		Orientation: cover.Orientation,
+		Is4K:        cover.Is4K,
+		SizeBytes:   cover.SizeBytes,
 		Status:      model.WallpaperStatusActive,
 	}
 	var buildOutbox func(*model.Wallpaper) (*model.OutboxEvent, error)
 	if s.outboxNotifier != nil {
 		buildOutbox = buildWallpaperPublishedOutbox
 	}
-	attachedTags, err := s.wallpaperRepo.CreateWithTags(ctx, wp, tagNames, buildOutbox)
+	attachedTags, err := s.wallpaperRepo.CreateWithTagsAndImages(ctx, wp, imageModels, tagNames, buildOutbox)
 	if err != nil {
 		if errors.Is(err, repository.ErrDuplicateObjectKey) {
 			return nil, errno.ErrDuplicateObjectKey
 		}
 		return nil, errno.ErrInternal.Wrap(err)
+	}
+	for i := range imageModels {
+		imageItems[i].ID = imageModels[i].ID
 	}
 
 	// 写库后联动缓存并即时唤醒 OutboxRelay（缓存失败仅告警，绝不阻断投稿成功返回）。
@@ -295,15 +325,16 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		Width:         wp.Width,
 		Height:        wp.Height,
 		Orientation:   wp.Orientation,
-		Is4K:          is4K,
+		Is4K:          cover.Is4K == 1,
 		SizeBytes:     wp.SizeBytes,
-		Mime:          meta.MimeType,
+		Mime:          imageItems[0].Mime,
 		LikeCount:     0, // M6 由 wallpaper_stats 承载，新发布恒为 0
 		FavCount:      0,
 		DownloadCount: 0,
 		CommentCount:  0,
-		Category:      category.ToItem(),
+		Category:      category.ToItem(s.store.BuildRawURL(category.IconKey)),
 		Tags:          tagItems,
+		Images:        imageItems,
 		Author:        author,
 		CreatedAt:     wp.CreatedAt.UTC(),
 	}, nil
@@ -412,6 +443,7 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, 
 		IsFavorited:   isFavorited,
 		Category:      cached.Category,
 		Tags:          tags,
+		Images:        s.buildImageItems(cached),
 		Author:        author,
 		CreatedAt:     cached.CreatedAt.UTC(),
 	}, nil
@@ -734,6 +766,7 @@ func (s *WallpaperService) assembleSummaryPage(
 		items = append(items, model.WallpaperSummary{
 			ID:            wp.ID,
 			Title:         wp.Title,
+			Description:   wp.Description,
 			ThumbURL:      s.store.BuildThumbURL(wp.ObjectKey),
 			Width:         wp.Width,
 			Height:        wp.Height,
@@ -746,6 +779,7 @@ func (s *WallpaperService) assembleSummaryPage(
 			IsLiked:       isLiked,
 			IsFavorited:   isFavorited,
 			Category:      wp.Category,
+			Images:        s.buildImageItems(wp),
 			Author:        author,
 			CreatedAt:     wp.CreatedAt.UTC(),
 		})
@@ -753,6 +787,75 @@ func (s *WallpaperService) assembleSummaryPage(
 
 	page := response.NewPageData(items, nextCursor, hasMore)
 	return &page, nil
+}
+
+func (s *WallpaperService) buildImageItems(cached model.WallpaperDetailCache) []model.WallpaperImageItem {
+	if len(cached.Images) == 0 {
+		mime, _ := storage.MimeFromObjectKey(cached.ObjectKey)
+		return []model.WallpaperImageItem{
+			{
+				ID:          cached.ID,
+				SortNo:      0,
+				ThumbURL:    s.store.BuildThumbURL(cached.ObjectKey),
+				RawURL:      s.store.BuildRawURL(cached.ObjectKey),
+				Width:       cached.Width,
+				Height:      cached.Height,
+				Orientation: cached.Orientation,
+				Is4K:        cached.Is4K,
+				SizeBytes:   cached.SizeBytes,
+				Mime:        mime,
+			},
+		}
+	}
+	out := make([]model.WallpaperImageItem, 0, len(cached.Images))
+	for _, img := range cached.Images {
+		mime, _ := storage.MimeFromObjectKey(img.ObjectKey)
+		out = append(out, model.WallpaperImageItem{
+			ID:          img.ID,
+			SortNo:      img.SortNo,
+			ThumbURL:    s.store.BuildThumbURL(img.ObjectKey),
+			RawURL:      s.store.BuildRawURL(img.ObjectKey),
+			Width:       img.Width,
+			Height:      img.Height,
+			Orientation: img.Orientation,
+			Is4K:        img.Is4K,
+			SizeBytes:   img.SizeBytes,
+			Mime:        mime,
+		})
+	}
+	return out
+}
+
+const maxImagesPerPost = 9
+
+func normalizePostObjectKeys(keys []string, singleKey string, userID uint64) ([]string, error) {
+	raw := keys
+	if len(raw) == 0 && strings.TrimSpace(singleKey) != "" {
+		raw = []string{singleKey}
+	}
+	if len(raw) == 0 {
+		return nil, errno.ErrInvalidParam.WithMessage("请至少上传 1 张壁纸图片")
+	}
+	if len(raw) > maxImagesPerPost {
+		return nil, errno.ErrInvalidParam.WithMessage("单条帖子最多上传 9 张壁纸")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		k := strings.TrimSpace(item)
+		if !storage.ValidateObjectKey(storage.SceneWallpaper, userID, k) {
+			return nil, errno.ErrInvalidParam.WithMessage("object_key 不合法或无权使用")
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	if len(out) == 0 {
+		return nil, errno.ErrInvalidParam.WithMessage("请至少上传 1 张壁纸图片")
+	}
+	return out, nil
 }
 
 func (s *WallpaperService) invalidateDetailCache(ctx context.Context, wallpaperID uint64) {
