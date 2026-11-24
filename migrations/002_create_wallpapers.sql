@@ -1,3 +1,5 @@
+SET NAMES utf8mb4;
+
 CREATE TABLE IF NOT EXISTS categories (
     id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '分类主键',
     slug       VARCHAR(32)     NOT NULL                COMMENT '英文唯一标识',
