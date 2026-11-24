@@ -262,14 +262,16 @@ func TestFeedService_ListHotFeed_RedisETagPaginationAndRemoveBust(t *testing.T) 
 
 	l1 := gocache.NewCache(2 * 1024 * 1024)
 	profileCache := cache.NewMultiLevel[model.UserProfileCache](l1, rdb, 30*time.Second, 30*time.Minute)
+	followingIDsCache := cache.NewMultiLevel[[]uint64](l1, rdb, 15*time.Second, 10*time.Minute)
 	wallpaperCache := cache.NewMultiLevel[model.WallpaperDetailCache](l1, rdb, 30*time.Second, 10*time.Minute)
 	statsCache := cache.NewMultiLevel[model.WallpaperStatsCache](l1, rdb, 10*time.Second, 10*time.Minute)
 	hotRank := cache.NewHotRank(rdb)
 
 	store := &stubStorage{}
 	userSvc := NewUserService(UserServiceDeps{
-		ProfileCache: profileCache,
-		Store:        store,
+		ProfileCache:      profileCache,
+		FollowingIDsCache: followingIDsCache,
+		Store:             store,
 	})
 	wpSvc := NewWallpaperService(
 		nil, nil, userSvc, wallpaperCache, nil, store,
@@ -287,6 +289,8 @@ func TestFeedService_ListHotFeed_RedisETagPaginationAndRemoveBust(t *testing.T) 
 	// 预热作者、壁纸详情与统计缓存，包含同分 ID=10 与 ID=9 验证字典序防错乱。
 	rawAuthor, _ := json.Marshal(model.UserProfileCache{ID: 7, Username: "artist7", Nickname: "画师7"})
 	_ = rdb.Set(ctx, userProfileKey(7), rawAuthor, time.Minute).Err()
+	rawFollowing, _ := json.Marshal([]uint64{7})
+	_ = rdb.Set(ctx, followingIDsKey(42), rawFollowing, time.Minute).Err()
 	for _, id := range []uint64{100, 10, 9, 8} {
 		rawWP, _ := json.Marshal(model.WallpaperDetailCache{
 			ID: id, UserID: 7, Title: "热门图", ObjectKey: "wallpapers/7/img.jpg", CreatedAt: now,
@@ -328,6 +332,12 @@ func TestFeedService_ListHotFeed_RedisETagPaginationAndRemoveBust(t *testing.T) 
 	if len(p1.Page.Items) != 2 || p1.Page.Items[0].ID != 100 || p1.Page.Items[1].ID != 10 || !p1.Page.HasMore {
 		t.Fatalf("unexpected p1 items: %+v", p1.Page)
 	}
+	if p1.Page.Items[0].HotScore != 10.0 || p1.Page.Items[1].HotScore != 4.5 {
+		t.Fatalf("expected hot_score [10.0, 4.5], got [%v, %v]", p1.Page.Items[0].HotScore, p1.Page.Items[1].HotScore)
+	}
+	if p1.Page.Items[0].Author.IsFollowing {
+		t.Fatalf("guest viewer must see author.is_following=false")
+	}
 
 	// 3. 游客携带相同 ETag（单值与多值列表）均命中 304，不装配 Page
 	hitSingle, err := feedSvc.ListHotFeed(ctx, 0, "", 2, wantETag)
@@ -339,10 +349,13 @@ func TestFeedService_ListHotFeed_RedisETagPaginationAndRemoveBust(t *testing.T) 
 		t.Fatalf("expected 304 multi hit, got %+v err=%v", hitMulti, err)
 	}
 
-	// 4. 登录态切换（viewerID=42 带着游客 u0 ETag）或换 limit 绝不误命中 304
+	// 4. 登录态切换（viewerID=42 带着游客 u0 ETag）或换 limit 绝不误命中 304，且正确标注 author.is_following=true
 	authRes, err := feedSvc.ListHotFeed(ctx, 42, "", 2, wantETag)
 	if err != nil || authRes.NotModified || authRes.ETag != `W/"hot-`+ver+`-l2-u42"` {
 		t.Fatalf("auth switch must miss 304 and issue u42 ETag, got %+v err=%v", authRes, err)
+	}
+	if len(authRes.Page.Items) != 2 || !authRes.Page.Items[0].Author.IsFollowing {
+		t.Fatalf("logged-in viewer 42 follows author 7, expected author.is_following=true, got %+v", authRes.Page.Items)
 	}
 	limitRes, err := feedSvc.ListHotFeed(ctx, 0, "", 3, wantETag)
 	if err != nil || limitRes.NotModified || limitRes.ETag != `W/"hot-`+ver+`-l3-u0"` {

@@ -147,8 +147,10 @@ func (s *FeedService) ListHotFeed(
 	pageEntries, hasMore := model.SliceHotPage(entries, afterScore, afterID, scoreCur != nil, limit)
 
 	pageIDs := make([]uint64, len(pageEntries))
+	hotScores := make(map[uint64]float64, len(pageEntries))
 	for i, e := range pageEntries {
 		pageIDs[i] = e.WallpaperID
+		hotScores[e.WallpaperID] = e.Score
 	}
 	var nextCursor string
 	if hasMore && len(pageEntries) > 0 {
@@ -160,7 +162,8 @@ func (s *FeedService) ListHotFeed(
 	}
 
 	page, err := s.wallpaperSvc.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{
-		viewerID: viewerID,
+		viewerID:  viewerID,
+		hotScores: hotScores,
 	})
 	if err != nil {
 		return nil, err

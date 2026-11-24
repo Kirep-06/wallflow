@@ -93,6 +93,7 @@ type summaryAssembleOpts struct {
 	viewerID       uint64
 	knownLiked     bool
 	knownFavorited bool
+	hotScores      map[uint64]float64
 }
 
 // WallpaperService 负责分类/标签直查、壁纸投稿软删、三级缓存详情以及冷热分离画廊列表。
@@ -395,6 +396,13 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, 
 		} else {
 			return nil, err
 		}
+	}
+	if viewerID > 0 && viewerID != author.ID {
+		followingIDs, followErr := s.userSvc.GetFollowingIDs(ctx, viewerID)
+		if followErr != nil {
+			return nil, followErr
+		}
+		author.IsFollowing = containsSortedID(followingIDs, author.ID)
 	}
 
 	stats, err := getWallpaperStats(ctx, s.statsCache, s.interactionRepo, wallpaperID)
@@ -741,6 +749,14 @@ func (s *WallpaperService) assembleSummaryPage(
 		}
 	}
 
+	var followingIDs []uint64
+	if opts.viewerID > 0 && len(ordered) > 0 {
+		followingIDs, err = s.userSvc.GetFollowingIDs(ctx, opts.viewerID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	items := make([]model.WallpaperSummary, 0, len(ordered))
 	for i := range ordered {
 		wp := ordered[i]
@@ -751,6 +767,9 @@ func (s *WallpaperService) assembleSummaryPage(
 			author = a
 		} else {
 			author = s.fallbackAuthor(wp.UserID)
+		}
+		if opts.viewerID > 0 && author.ID != opts.viewerID {
+			author.IsFollowing = containsSortedID(followingIDs, author.ID)
 		}
 
 		stats := statsMap[wp.ID]
@@ -772,6 +791,7 @@ func (s *WallpaperService) assembleSummaryPage(
 			Height:        wp.Height,
 			Orientation:   wp.Orientation,
 			Is4K:          wp.Is4K,
+			HotScore:      opts.hotScores[wp.ID],
 			LikeCount:     stats.LikeCount,
 			FavCount:      stats.FavCount,
 			DownloadCount: stats.DownloadCount,

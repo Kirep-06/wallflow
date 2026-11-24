@@ -150,6 +150,14 @@ func (s *UserService) EnsureExists(ctx context.Context, userID uint64) error {
 	return nil
 }
 
+// GetFollowingIDs 返回指定用户的全量关注对象升序 ID 切片（走 L1/L2 缓存；未装配关注依赖时返回 nil）。
+func (s *UserService) GetFollowingIDs(ctx context.Context, userID uint64) ([]uint64, error) {
+	if userID == 0 || (s.followingIDsCache == nil && s.followRepo == nil) {
+		return nil, nil
+	}
+	return getFollowingIDs(ctx, s.followingIDsCache, s.followRepo, userID)
+}
+
 // GetAuthor 返回壁纸详情内嵌的作者展示信息。
 func (s *UserService) GetAuthor(ctx context.Context, userID uint64) (model.WallpaperAuthor, error) {
 	cached, err := s.getCachedProfile(ctx, userID)

@@ -309,12 +309,13 @@ type CreateWallpaperRequest struct {
 	ObjectKeys  []string `json:"object_keys"`
 }
 
-// WallpaperAuthor 为壁纸详情内嵌作者信息。
+// WallpaperAuthor 为壁纸详情与列表内嵌作者信息。
 type WallpaperAuthor struct {
-	ID        uint64 `json:"id,string"`
-	Username  string `json:"username"`
-	Nickname  string `json:"nickname"`
-	AvatarURL string `json:"avatar_url"`
+	ID          uint64 `json:"id,string"`
+	Username    string `json:"username"`
+	Nickname    string `json:"nickname"`
+	AvatarURL   string `json:"avatar_url"`
+	IsFollowing bool   `json:"is_following"`
 }
 
 // WallpaperDetail 为壁纸详情响应结构。
@@ -353,6 +354,7 @@ type WallpaperSummary struct {
 	Height        uint32               `json:"height"`
 	Orientation   uint8                `json:"orientation"`
 	Is4K          bool                 `json:"is_4k"`
+	HotScore      float64              `json:"hot_score,omitempty"`
 	LikeCount     uint64               `json:"like_count"`
 	FavCount      uint64               `json:"fav_count"`
 	DownloadCount uint64               `json:"download_count"`
