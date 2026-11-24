@@ -14,9 +14,17 @@ var (
 	ErrCategoryNotFound      = errors.New("repository: category not found")
 	ErrCategorySlugDuplicate = errors.New("repository: category slug already exists")
 	ErrCategoryHasWallpapers = errors.New("repository: category still has wallpapers")
+	ErrCategoryHasChildren   = errors.New("repository: category still has sub-categories")
 	ErrTagNotFound           = errors.New("repository: tag not found")
 	ErrTagNameDuplicate      = errors.New("repository: tag name already exists")
 )
+
+// CategoryStats 汇总单个分类的壁纸总数、近 7 天新帖数与累计下载量。
+type CategoryStats struct {
+	WallpaperCount uint64
+	WeeklyNewCount uint64
+	DownloadCount  uint64
+}
 
 // MetaRepository 封装分类与标签字典的 MySQL 直查与管理写入访问。
 type MetaRepository struct {
@@ -28,36 +36,74 @@ func NewMetaRepository(db *gorm.DB) *MetaRepository {
 	return &MetaRepository{db: db}
 }
 
-// ListCategories 按 sort_no 升序、id 升序返回全部分类。
+// ListCategories 按 parent_id 升序、sort_no 升序、id 升序返回全部分类（含大类与小类）。
 func (r *MetaRepository) ListCategories(ctx context.Context) ([]model.Category, error) {
 	var items []model.Category
 	if err := r.db.WithContext(ctx).
-		Select("id, slug, name, sort_no, icon_key, created_at").
-		Order("sort_no ASC, id ASC").
+		Select("id, parent_id, slug, name, description, sort_no, icon_key, created_at").
+		Order("parent_id ASC, sort_no ASC, id ASC").
 		Find(&items).Error; err != nil {
 		return nil, fmt.Errorf("meta repo list categories: %w", err)
 	}
 	return items, nil
 }
 
-// CountWallpapersByCategory 统计各分类下正常壁纸数量。
-func (r *MetaRepository) CountWallpapersByCategory(ctx context.Context) (map[uint64]uint64, error) {
+// ListChildCategoryIDs 返回指定一级大分类下的全部二级小分类 ID。
+func (r *MetaRepository) ListChildCategoryIDs(ctx context.Context, parentID uint64) ([]uint64, error) {
+	if parentID == 0 {
+		return nil, nil
+	}
+	var ids []uint64
+	if err := r.db.WithContext(ctx).
+		Model(&model.Category{}).
+		Where("parent_id = ?", parentID).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("meta repo list child category ids: %w", err)
+	}
+	return ids, nil
+}
+
+// QueryCategoryStats 一次聚合查询各分类下的正常壁纸总数、本周新帖数（近 7 天）与累计下载量。
+func (r *MetaRepository) QueryCategoryStats(ctx context.Context) (map[uint64]CategoryStats, error) {
 	type row struct {
-		CategoryID uint64
-		Cnt        uint64
+		CategoryID     uint64
+		WallpaperCount uint64
+		WeeklyNewCount uint64
+		DownloadCount  uint64
 	}
 	var rows []row
 	if err := r.db.WithContext(ctx).
-		Model(&model.Wallpaper{}).
-		Select("category_id, COUNT(*) AS cnt").
-		Where("status = ?", model.WallpaperStatusActive).
-		Group("category_id").
+		Table("wallpapers AS w").
+		Select(`w.category_id AS category_id,
+			COUNT(*) AS wallpaper_count,
+			SUM(CASE WHEN w.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS weekly_new_count,
+			COALESCE(SUM(s.download_count), 0) AS download_count`).
+		Joins("LEFT JOIN wallpaper_stats AS s ON s.wallpaper_id = w.id").
+		Where("w.status = ?", model.WallpaperStatusActive).
+		Group("w.category_id").
 		Scan(&rows).Error; err != nil {
-		return nil, fmt.Errorf("meta repo count wallpapers by category: %w", err)
+		return nil, fmt.Errorf("meta repo query category stats: %w", err)
 	}
-	counts := make(map[uint64]uint64, len(rows))
+	out := make(map[uint64]CategoryStats, len(rows))
 	for _, item := range rows {
-		counts[item.CategoryID] = item.Cnt
+		out[item.CategoryID] = CategoryStats{
+			WallpaperCount: item.WallpaperCount,
+			WeeklyNewCount: item.WeeklyNewCount,
+			DownloadCount:  item.DownloadCount,
+		}
+	}
+	return out, nil
+}
+
+// CountWallpapersByCategory 统计各分类下正常壁纸数量。
+func (r *MetaRepository) CountWallpapersByCategory(ctx context.Context) (map[uint64]uint64, error) {
+	stats, err := r.QueryCategoryStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[uint64]uint64, len(stats))
+	for cid, s := range stats {
+		counts[cid] = s.WallpaperCount
 	}
 	return counts, nil
 }
@@ -66,7 +112,7 @@ func (r *MetaRepository) CountWallpapersByCategory(ctx context.Context) (map[uin
 func (r *MetaRepository) FindCategoryByID(ctx context.Context, id uint64) (*model.Category, error) {
 	var cat model.Category
 	err := r.db.WithContext(ctx).
-		Select("id, slug, name, sort_no, icon_key, created_at").
+		Select("id, parent_id, slug, name, description, sort_no, icon_key, created_at").
 		Where("id = ?", id).
 		Take(&cat).Error
 	if err != nil {
@@ -114,6 +160,15 @@ func (r *MetaRepository) DeleteCategoryWithMigrate(ctx context.Context, id uint6
 				return ErrCategoryNotFound
 			}
 			return fmt.Errorf("find category: %w", err)
+		}
+
+		// 若为一级大分类且名下仍有子小分类，禁止直接删除
+		var childCount int64
+		if err := tx.Model(&model.Category{}).Where("parent_id = ?", id).Count(&childCount).Error; err != nil {
+			return fmt.Errorf("count child categories: %w", err)
+		}
+		if childCount > 0 {
+			return ErrCategoryHasChildren
 		}
 
 		var wpCount int64

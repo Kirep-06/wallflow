@@ -218,7 +218,7 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 
 	var cats []model.Category
 	if err := r.db.WithContext(ctx).
-		Select("id, slug, name, sort_no").
+		Select("id, parent_id, slug, name, description, sort_no, icon_key").
 		Where("id IN ?", catIDs).
 		Find(&cats).Error; err != nil {
 		return nil, fmt.Errorf("wallpaper repo find categories by ids: %w", err)
@@ -312,6 +312,40 @@ func (r *WallpaperRepository) ListCategoryWallpaperIDs(ctx context.Context, cate
 		Table(model.Wallpaper{}.TableName()).
 		Where("status = ? AND category_id = ?", model.WallpaperStatusActive, categoryID)
 	return listWallpaperIDs(q, "id", beforeID, limit, "list category wallpaper ids")
+}
+
+// ListCategoriesWallpaperIDs 倒序游标查询多个分类（大类 + 其下所有小类）下的正常壁纸 ID。
+func (r *WallpaperRepository) ListCategoriesWallpaperIDs(ctx context.Context, categoryIDs []uint64, beforeID uint64, limit int) ([]uint64, error) {
+	if len(categoryIDs) == 0 || limit <= 0 {
+		return []uint64{}, nil
+	}
+	if len(categoryIDs) == 1 {
+		return r.ListCategoryWallpaperIDs(ctx, categoryIDs[0], beforeID, limit)
+	}
+	q := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()).
+		Where("status = ? AND category_id IN ?", model.WallpaperStatusActive, categoryIDs)
+	return listWallpaperIDs(q, "id", beforeID, limit, "list categories wallpaper ids")
+}
+
+// ListHotIDsByCategories 按互动加权热度降序返回指定分类集合内的 TopN 壁纸 ID。
+func (r *WallpaperRepository) ListHotIDsByCategories(ctx context.Context, categoryIDs []uint64, limit int) ([]uint64, error) {
+	if len(categoryIDs) == 0 || limit <= 0 {
+		return []uint64{}, nil
+	}
+	ids := make([]uint64, 0, limit)
+	err := r.db.WithContext(ctx).
+		Table(model.Wallpaper{}.TableName()+" AS w").
+		Select("w.id").
+		Joins("LEFT JOIN wallpaper_stats AS s ON s.wallpaper_id = w.id").
+		Where("w.status = ? AND w.category_id IN ?", model.WallpaperStatusActive, categoryIDs).
+		Order("(COALESCE(s.like_count, 0) * 18 + COALESCE(s.fav_count, 0) * 15 + COALESCE(s.download_count, 0) * 12 + COALESCE(s.comment_count, 0) * 10) DESC, w.id DESC").
+		Limit(limit).
+		Pluck("w.id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("wallpaper repo list hot ids by categories: %w", err)
+	}
+	return ids, nil
 }
 
 // ListUserWallpaperIDs 命中覆盖索引 idx_user_status_id 倒序游标查询创作者已发布的正常壁纸 ID。

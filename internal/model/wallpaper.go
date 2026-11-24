@@ -11,14 +11,16 @@ const (
 	OrientationSquare    uint8 = 3
 )
 
-// Category 对应 MySQL categories 表实体。
+// Category 对应 MySQL categories 表实体（支持 parent_id 两级分类树与板块简介）。
 type Category struct {
-	ID        uint64    `gorm:"primaryKey;autoIncrement"`
-	Slug      string    `gorm:"type:varchar(32);not null;uniqueIndex:uk_slug"`
-	Name      string    `gorm:"type:varchar(32);not null"`
-	SortNo    int       `gorm:"not null;default:0"`
-	IconKey   string    `gorm:"type:varchar(255);not null;default:''"`
-	CreatedAt time.Time `gorm:"autoCreateTime"`
+	ID          uint64    `gorm:"primaryKey;autoIncrement"`
+	ParentID    uint64    `gorm:"not null;default:0"`
+	Slug        string    `gorm:"type:varchar(32);not null;uniqueIndex:uk_slug"`
+	Name        string    `gorm:"type:varchar(32);not null"`
+	Description string    `gorm:"type:varchar(300);not null;default:''"`
+	SortNo      int       `gorm:"not null;default:0"`
+	IconKey     string    `gorm:"type:varchar(255);not null;default:''"`
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
 }
 
 // TableName 指定 GORM 表名。
@@ -33,11 +35,13 @@ func (c *Category) ToItem(iconURL ...string) CategoryItem {
 		url = iconURL[0]
 	}
 	return CategoryItem{
-		ID:      c.ID,
-		Slug:    c.Slug,
-		Name:    c.Name,
-		SortNo:  c.SortNo,
-		IconURL: url,
+		ID:          c.ID,
+		ParentID:    c.ParentID,
+		Slug:        c.Slug,
+		Name:        c.Name,
+		Description: c.Description,
+		SortNo:      c.SortNo,
+		IconURL:     url,
 	}
 }
 
@@ -131,10 +135,11 @@ type WallpaperDetailCache struct {
 
 // WallpaperListQuery 为发现页画廊列表与分类/标签单维互斥筛选查询参数。
 type WallpaperListQuery struct {
-	Cursor     string
-	Limit      int
-	CategoryID uint64
-	TagID      uint64
+	Cursor      string
+	Limit       int
+	CategoryID  uint64
+	CategoryIDs []uint64
+	TagID       uint64
 }
 
 // CalcOrientation 按 ±5% 容差计算壁纸方向（1-横屏 2-竖屏 3-方图）。
@@ -157,13 +162,18 @@ func Is4KResolution(width, height uint32) bool {
 	return max(width, height) >= 3840 && min(width, height) >= 2160
 }
 
-// CategoryItem 为壁纸分类响应项。
+// CategoryItem 为壁纸分类响应项（含父级 ID、简介与模块统计指标）。
 type CategoryItem struct {
-	ID      uint64 `json:"id,string"`
-	Slug    string `json:"slug"`
-	Name    string `json:"name"`
-	SortNo  int    `json:"sort_no"`
-	IconURL string `json:"icon_url,omitempty"`
+	ID             uint64 `json:"id,string"`
+	ParentID       uint64 `json:"parent_id,string"`
+	Slug           string `json:"slug"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	SortNo         int    `json:"sort_no"`
+	IconURL        string `json:"icon_url,omitempty"`
+	WallpaperCount uint64 `json:"wallpaper_count"`
+	WeeklyNewCount uint64 `json:"weekly_new_count"`
+	DownloadCount  uint64 `json:"download_count"`
 }
 
 // CategoryList 为全站分类列表响应结构。
@@ -197,18 +207,22 @@ type AdminCategoryList struct {
 
 // AdminCreateCategoryRequest 为后台新建分类请求体。
 type AdminCreateCategoryRequest struct {
-	Slug    string `json:"slug"`
-	Name    string `json:"name"`
-	SortNo  int    `json:"sort_no"`
-	IconKey string `json:"icon_key"`
+	ParentID    string `json:"parent_id"`
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	SortNo      int    `json:"sort_no"`
+	IconKey     string `json:"icon_key"`
 }
 
 // AdminUpdateCategoryRequest 为后台编辑分类请求体（指针区分未传与空值）。
 type AdminUpdateCategoryRequest struct {
-	Slug    *string `json:"slug"`
-	Name    *string `json:"name"`
-	SortNo  *int    `json:"sort_no"`
-	IconKey *string `json:"icon_key"`
+	ParentID    *string `json:"parent_id"`
+	Slug        *string `json:"slug"`
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	SortNo      *int    `json:"sort_no"`
+	IconKey     *string `json:"icon_key"`
 }
 
 // AdminCreateTagRequest 为后台新建话题/标签请求体。

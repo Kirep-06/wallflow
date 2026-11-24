@@ -136,15 +136,41 @@ func NewWallpaperService(
 	return s
 }
 
-// ListCategories 直查全站预置壁纸分类列表。
+// ListCategories 直查全站两级壁纸分类列表（含各板块简介与汇总统计，大类自动汇总子小类数据）。
 func (s *WallpaperService) ListCategories(ctx context.Context) (*model.CategoryList, error) {
 	cats, err := s.metaRepo.ListCategories(ctx)
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
+	rawStats, err := s.metaRepo.QueryCategoryStats(ctx)
+	if err != nil {
+		return nil, errno.ErrInternal.Wrap(err)
+	}
+
+	// 将二级小分类的统计向上聚合到对应一级大分类（大类本身直挂的壁纸也计入）
+	rolled := make(map[uint64]repository.CategoryStats, len(cats))
+	for id, st := range rawStats {
+		rolled[id] = st
+	}
+	for i := range cats {
+		if cats[i].ParentID > 0 {
+			childSt := rawStats[cats[i].ID]
+			parentSt := rolled[cats[i].ParentID]
+			parentSt.WallpaperCount += childSt.WallpaperCount
+			parentSt.WeeklyNewCount += childSt.WeeklyNewCount
+			parentSt.DownloadCount += childSt.DownloadCount
+			rolled[cats[i].ParentID] = parentSt
+		}
+	}
+
 	items := make([]model.CategoryItem, 0, len(cats))
 	for i := range cats {
-		items = append(items, cats[i].ToItem(s.store.BuildRawURL(cats[i].IconKey)))
+		item := cats[i].ToItem(s.store.BuildRawURL(cats[i].IconKey))
+		st := rolled[cats[i].ID]
+		item.WallpaperCount = st.WallpaperCount
+		item.WeeklyNewCount = st.WeeklyNewCount
+		item.DownloadCount = st.DownloadCount
+		items = append(items, item)
 	}
 	return &model.CategoryList{Items: items}, nil
 }
@@ -409,7 +435,11 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 	var rawIDs []uint64
 	switch {
 	case query.CategoryID > 0:
-		rawIDs, err = s.wallpaperRepo.ListCategoryWallpaperIDs(ctx, query.CategoryID, beforeID, want)
+		scopeIDs, scopeErr := s.resolveCategoryScope(ctx, query.CategoryID)
+		if scopeErr != nil {
+			return nil, errno.ErrInternal.Wrap(scopeErr)
+		}
+		rawIDs, err = s.wallpaperRepo.ListCategoriesWallpaperIDs(ctx, scopeIDs, beforeID, want)
 	case query.TagID > 0:
 		rawIDs, err = s.wallpaperRepo.ListTagWallpaperIDs(ctx, query.TagID, beforeID, want)
 	default:
@@ -424,6 +454,34 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{viewerID: viewerID})
+}
+
+// ListCategoryHot 返回指定大分类（含子小类）或小分类内的 TopN 热门壁纸列表。
+func (s *WallpaperService) ListCategoryHot(ctx context.Context, viewerID, categoryID uint64, rawLimit int) (*response.PageData[model.WallpaperSummary], error) {
+	limit, err := normalizeListLimit(rawLimit)
+	if err != nil {
+		return nil, err
+	}
+	scopeIDs, err := s.resolveCategoryScope(ctx, categoryID)
+	if err != nil {
+		return nil, errno.ErrInternal.Wrap(err)
+	}
+	ids, err := s.wallpaperRepo.ListHotIDsByCategories(ctx, scopeIDs, limit)
+	if err != nil {
+		return nil, errno.ErrInternal.Wrap(err)
+	}
+	return s.assembleSummaryPage(ctx, ids, "", false, summaryAssembleOpts{viewerID: viewerID})
+}
+
+func (s *WallpaperService) resolveCategoryScope(ctx context.Context, categoryID uint64) ([]uint64, error) {
+	childIDs, err := s.metaRepo.ListChildCategoryIDs(ctx, categoryID)
+	if err != nil {
+		return nil, err
+	}
+	scope := make([]uint64, 0, 1+len(childIDs))
+	scope = append(scope, categoryID)
+	scope = append(scope, childIDs...)
+	return scope, nil
 }
 
 // ListUserWallpapers 返回指定创作者公开主页的已发布壁纸流（用户不存在返回 404/20003）。

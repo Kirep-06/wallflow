@@ -20,6 +20,7 @@ var categorySlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 const (
 	maxCategoryNameRunes = 32
+	maxCategoryDescRunes = 300
 	defaultAdminTagLimit = 200
 )
 
@@ -87,10 +88,11 @@ func (s *AdminMetaService) ListCategories(ctx context.Context) (*model.AdminCate
 	return &model.AdminCategoryList{Items: items}, nil
 }
 
-// CreateCategory 新增分类（支持可选七牛云图标直传核验）。
+// CreateCategory 新增分类（支持一级大分类 parent_id=0 或归属大类下的二级小分类、简介与七牛云图标）。
 func (s *AdminMetaService) CreateCategory(ctx context.Context, adminUserID uint64, req model.AdminCreateCategoryRequest) (*model.AdminCategoryItem, error) {
 	slug := strings.ToLower(strings.TrimSpace(req.Slug))
 	name := strings.TrimSpace(req.Name)
+	desc := strings.TrimSpace(req.Description)
 	iconKey := strings.TrimSpace(req.IconKey)
 
 	if !categorySlugPattern.MatchString(slug) {
@@ -99,6 +101,15 @@ func (s *AdminMetaService) CreateCategory(ctx context.Context, adminUserID uint6
 	if name == "" || utf8.RuneCountInString(name) > maxCategoryNameRunes {
 		return nil, errno.ErrInvalidParam.WithMessage("分类名称长度需在 1 至 32 个字符之间")
 	}
+	if utf8.RuneCountInString(desc) > maxCategoryDescRunes {
+		return nil, errno.ErrInvalidParam.WithMessage("分类简介不能超过 300 个字符")
+	}
+
+	parentID, err := s.parseAndValidateParentID(ctx, req.ParentID, 0)
+	if err != nil {
+		return nil, err
+	}
+
 	if iconKey != "" {
 		if err := verifyIconObject(ctx, s.store, adminUserID, iconKey); err != nil {
 			return nil, err
@@ -106,10 +117,12 @@ func (s *AdminMetaService) CreateCategory(ctx context.Context, adminUserID uint6
 	}
 
 	cat := &model.Category{
-		Slug:    slug,
-		Name:    name,
-		SortNo:  req.SortNo,
-		IconKey: iconKey,
+		ParentID:    parentID,
+		Slug:        slug,
+		Name:        name,
+		Description: desc,
+		SortNo:      req.SortNo,
+		IconKey:     iconKey,
 	}
 	if err := s.metaRepo.CreateCategory(ctx, cat); err != nil {
 		if errors.Is(err, repository.ErrCategorySlugDuplicate) {
@@ -123,7 +136,7 @@ func (s *AdminMetaService) CreateCategory(ctx context.Context, adminUserID uint6
 	}, nil
 }
 
-// UpdateCategory 编辑分类名称、标识、排序值或图标。
+// UpdateCategory 编辑分类名称、标识、父级大分类、简介、排序值或图标。
 func (s *AdminMetaService) UpdateCategory(ctx context.Context, adminUserID, id uint64, req model.AdminUpdateCategoryRequest) (*model.AdminCategoryItem, error) {
 	if _, err := s.metaRepo.FindCategoryByID(ctx, id); err != nil {
 		if errors.Is(err, repository.ErrCategoryNotFound) {
@@ -133,6 +146,13 @@ func (s *AdminMetaService) UpdateCategory(ctx context.Context, adminUserID, id u
 	}
 
 	fields := make(map[string]any)
+	if req.ParentID != nil {
+		parentID, err := s.parseAndValidateParentID(ctx, *req.ParentID, id)
+		if err != nil {
+			return nil, err
+		}
+		fields["parent_id"] = parentID
+	}
 	if req.Slug != nil {
 		slug := strings.ToLower(strings.TrimSpace(*req.Slug))
 		if !categorySlugPattern.MatchString(slug) {
@@ -146,6 +166,13 @@ func (s *AdminMetaService) UpdateCategory(ctx context.Context, adminUserID, id u
 			return nil, errno.ErrInvalidParam.WithMessage("分类名称长度需在 1 至 32 个字符之间")
 		}
 		fields["name"] = name
+	}
+	if req.Description != nil {
+		desc := strings.TrimSpace(*req.Description)
+		if utf8.RuneCountInString(desc) > maxCategoryDescRunes {
+			return nil, errno.ErrInvalidParam.WithMessage("分类简介不能超过 300 个字符")
+		}
+		fields["description"] = desc
 	}
 	if req.SortNo != nil {
 		fields["sort_no"] = *req.SortNo
@@ -178,13 +205,15 @@ func (s *AdminMetaService) UpdateCategory(ctx context.Context, adminUserID, id u
 	}, nil
 }
 
-// DeleteCategory 安全删除分类：名下有壁纸时必须指定合法迁移目标分类 migrateToID。
+// DeleteCategory 安全删除分类：大类下有子小类禁止直删，名下有壁纸时必须指定迁移目标分类。
 func (s *AdminMetaService) DeleteCategory(ctx context.Context, id, migrateToID uint64) error {
 	affectedIDs, err := s.metaRepo.DeleteCategoryWithMigrate(ctx, id, migrateToID)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrCategoryNotFound):
 			return errno.ErrNotFound.WithMessage("分类或目标迁移分类不存在")
+		case errors.Is(err, repository.ErrCategoryHasChildren):
+			return errno.ErrInvalidParam.WithMessage("该大分类下仍有小分类板块，请先删除或移走小分类")
 		case errors.Is(err, repository.ErrCategoryHasWallpapers):
 			return errno.ErrInvalidParam.WithMessage("该分类下仍有壁纸，请指定迁移目标分类后再删除")
 		default:
@@ -193,6 +222,34 @@ func (s *AdminMetaService) DeleteCategory(ctx context.Context, id, migrateToID u
 	}
 	s.invalidateWallpaperCaches(ctx, affectedIDs)
 	return nil
+}
+
+func (s *AdminMetaService) parseAndValidateParentID(ctx context.Context, raw string, selfID uint64) (uint64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "0" {
+		return 0, nil
+	}
+	pid, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil {
+		return 0, errno.ErrInvalidParam.WithMessage("父级大分类 ID 非法")
+	}
+	if pid == 0 {
+		return 0, nil
+	}
+	if selfID > 0 && pid == selfID {
+		return 0, errno.ErrInvalidParam.WithMessage("父级分类不能指向自身")
+	}
+	parent, err := s.metaRepo.FindCategoryByID(ctx, pid)
+	if err != nil {
+		if errors.Is(err, repository.ErrCategoryNotFound) {
+			return 0, errno.ErrInvalidParam.WithMessage("所选父级大分类不存在")
+		}
+		return 0, errno.ErrInternal.Wrap(err)
+	}
+	if parent.ParentID != 0 {
+		return 0, errno.ErrInvalidParam.WithMessage("仅支持两级分类，请选择一级大分类作为父级")
+	}
+	return pid, nil
 }
 
 // ListTags 返回后台话题/标签列表（支持关键词过滤）。
