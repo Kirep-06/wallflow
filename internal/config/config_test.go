@@ -54,6 +54,24 @@ func TestLoad(t *testing.T) {
 func TestLoadStorageConfig(t *testing.T) {
 	validJWT := "0123456789abcdef0123456789abcdef"
 
+	t.Run("local provider fills defaults and supports env override", func(t *testing.T) {
+		t.Setenv(EnvJWTSecret, validJWT)
+		t.Setenv(EnvStorageProvider, StorageProviderLocal)
+		t.Setenv(EnvStorageLocalDir, "/tmp/wf-uploads")
+		p := writeTempConfig(t, "storage:\n  provider: noop\n")
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load(local) failed: %v", err)
+		}
+		if cfg.Storage.Provider != StorageProviderLocal ||
+			cfg.Storage.Local.Dir != "/tmp/wf-uploads" ||
+			cfg.Storage.Local.PublicURL != "/api/v1/uploads/files" ||
+			cfg.Storage.Local.UploadURL != "/api/v1/uploads/local" ||
+			cfg.Storage.Local.SignSecret != validJWT {
+			t.Fatalf("unexpected local storage config: %+v", cfg.Storage)
+		}
+	})
+
 	t.Run("empty provider defaults to noop", func(t *testing.T) {
 		t.Setenv(EnvJWTSecret, validJWT)
 		t.Setenv(EnvQiniuAccessKey, "")

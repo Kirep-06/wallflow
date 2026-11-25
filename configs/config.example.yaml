@@ -31,8 +31,13 @@ rabbitmq:
   vhost: /
 
 storage:
+  # 支持 noop / local / qiniu（可通过环境变量 WF_STORAGE_PROVIDER 覆盖）
   provider: noop
   cdn_domain: ""
+  local:
+    dir: uploads
+    public_url: /api/v1/uploads/files
+    upload_url: /api/v1/uploads/local
   qiniu:
     bucket: ""
     zone: z0

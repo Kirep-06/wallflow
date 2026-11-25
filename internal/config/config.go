@@ -13,17 +13,23 @@ import (
 
 const (
 	DefaultConfigPath    = "configs/config.local.yaml"
-	EnvConfigFile        = "WF_CONFIG_FILE"
-	EnvJWTSecret         = "WF_AUTH_JWT_SECRET"
-	EnvQiniuAccessKey    = "WF_STORAGE_QINIU_ACCESS_KEY"
-	EnvQiniuSecretKey    = "WF_STORAGE_QINIU_SECRET_KEY"
-	EnvRabbitMQPassword  = "WF_RABBITMQ_PASSWORD"
-	EnvAdminUsernames    = "WF_ADMIN_USERNAMES"
-	MinJWTSecretLen      = 32
-	StorageProviderNoop  = "noop"
-	StorageProviderQiniu = "qiniu"
-	defaultRabbitMQPort  = 5672
-	defaultRabbitMQVhost = "/"
+	EnvConfigFile          = "WF_CONFIG_FILE"
+	EnvJWTSecret           = "WF_AUTH_JWT_SECRET"
+	EnvStorageProvider     = "WF_STORAGE_PROVIDER"
+	EnvStorageLocalDir     = "WF_STORAGE_LOCAL_DIR"
+	EnvQiniuAccessKey      = "WF_STORAGE_QINIU_ACCESS_KEY"
+	EnvQiniuSecretKey      = "WF_STORAGE_QINIU_SECRET_KEY"
+	EnvRabbitMQPassword    = "WF_RABBITMQ_PASSWORD"
+	EnvAdminUsernames      = "WF_ADMIN_USERNAMES"
+	MinJWTSecretLen        = 32
+	StorageProviderNoop    = "noop"
+	StorageProviderLocal   = "local"
+	StorageProviderQiniu   = "qiniu"
+	defaultLocalStorageDir = "uploads"
+	defaultLocalPublicURL  = "/api/v1/uploads/files"
+	defaultLocalUploadURL  = "/api/v1/uploads/local"
+	defaultRabbitMQPort    = 5672
+	defaultRabbitMQVhost   = "/"
 )
 
 var qiniuZoneUploadURLs = map[string]string{
@@ -99,11 +105,20 @@ type RabbitMQConfig struct {
 	Vhost    string `mapstructure:"vhost"`
 }
 
-// StorageConfig 为对象存储与 CDN 域名配置。
+// StorageConfig 为对象存储与 CDN 域名配置（支持 noop / local / qiniu）。
 type StorageConfig struct {
-	Provider  string      `mapstructure:"provider"`
-	CDNDomain string      `mapstructure:"cdn_domain"`
-	Qiniu     QiniuConfig `mapstructure:"qiniu"`
+	Provider  string             `mapstructure:"provider"`
+	CDNDomain string             `mapstructure:"cdn_domain"`
+	Local     LocalStorageConfig `mapstructure:"local"`
+	Qiniu     QiniuConfig        `mapstructure:"qiniu"`
+}
+
+// LocalStorageConfig 为本地磁盘存储配置。
+type LocalStorageConfig struct {
+	Dir        string `mapstructure:"dir"`
+	PublicURL  string `mapstructure:"public_url"`
+	UploadURL  string `mapstructure:"upload_url"`
+	SignSecret string `mapstructure:"-"`
 }
 
 // QiniuConfig 为七牛云对象存储配置（AK/SK 仅从环境变量注入）。
@@ -136,7 +151,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: env %s must be at least %d bytes", EnvJWTSecret, MinJWTSecretLen)
 	}
 
-	if err := normalizeAndValidateStorage(&cfg.Storage); err != nil {
+	if err := normalizeAndValidateStorage(&cfg.Storage, cfg.JWTSecret); err != nil {
 		return nil, err
 	}
 	if err := normalizeAndValidateRabbitMQ(&cfg.RabbitMQ); err != nil {
@@ -196,12 +211,22 @@ func normalizeAndValidateRabbitMQ(r *RabbitMQConfig) error {
 	return nil
 }
 
-func normalizeAndValidateStorage(s *StorageConfig) error {
+func normalizeAndValidateStorage(s *StorageConfig, jwtSecret string) error {
+	if envProvider := strings.TrimSpace(os.Getenv(EnvStorageProvider)); envProvider != "" {
+		s.Provider = envProvider
+	}
 	s.Provider = strings.ToLower(strings.TrimSpace(s.Provider))
 	if s.Provider == "" {
 		s.Provider = StorageProviderNoop
 	}
 	s.CDNDomain = strings.TrimRight(strings.TrimSpace(s.CDNDomain), "/")
+	if envDir := strings.TrimSpace(os.Getenv(EnvStorageLocalDir)); envDir != "" {
+		s.Local.Dir = envDir
+	}
+	s.Local.Dir = strings.TrimSpace(s.Local.Dir)
+	s.Local.PublicURL = strings.TrimRight(strings.TrimSpace(s.Local.PublicURL), "/")
+	s.Local.UploadURL = strings.TrimRight(strings.TrimSpace(s.Local.UploadURL), "/")
+	s.Local.SignSecret = jwtSecret
 	s.Qiniu.Bucket = strings.TrimSpace(s.Qiniu.Bucket)
 	s.Qiniu.Zone = strings.ToLower(strings.TrimSpace(s.Qiniu.Zone))
 	s.Qiniu.UploadURL = strings.TrimRight(strings.TrimSpace(s.Qiniu.UploadURL), "/")
@@ -211,6 +236,21 @@ func normalizeAndValidateStorage(s *StorageConfig) error {
 
 	switch s.Provider {
 	case StorageProviderNoop:
+		return nil
+	case StorageProviderLocal:
+		if s.Local.Dir == "" {
+			s.Local.Dir = defaultLocalStorageDir
+		}
+		if s.Local.PublicURL == "" {
+			if s.CDNDomain != "" {
+				s.Local.PublicURL = s.CDNDomain
+			} else {
+				s.Local.PublicURL = defaultLocalPublicURL
+			}
+		}
+		if s.Local.UploadURL == "" {
+			s.Local.UploadURL = defaultLocalUploadURL
+		}
 		return nil
 	case StorageProviderQiniu:
 		if s.Qiniu.AccessKey == "" {

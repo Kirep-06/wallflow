@@ -39,8 +39,12 @@ var (
 	ErrStorageDisabled = errors.New("storage: disabled in noop mode")
 	// ErrObjectNotFound 表示对象在远端存储中不存在（?imageInfo 返回 404）。
 	ErrObjectNotFound = errors.New("storage: object not found")
-	// ErrInvalidImage 表示远端对象不是合法图片、响应体超限或格式不在白名单内。
+	// ErrInvalidImage 表示远端或本地对象不是合法图片、响应体超限或格式不在白名单内。
 	ErrInvalidImage = errors.New("storage: invalid image object")
+	// ErrInvalidUploadToken 表示本地直传凭证缺失、签名非法或已过期。
+	ErrInvalidUploadToken = errors.New("storage: invalid or expired upload token")
+	// ErrUploadTooLarge 表示本地直传文件体积超过场景限制。
+	ErrUploadTooLarge = errors.New("storage: uploaded file too large")
 )
 
 var (
@@ -90,16 +94,19 @@ type StorageService interface {
 	BuildRawURL(objectKey string) string
 }
 
-// New 根据配置构造对象存储实现（noop 或 qiniu）。
+// New 根据配置构造对象存储实现（noop、local 或 qiniu）。
 func New(cfg config.StorageConfig) (StorageService, error) {
 	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
-	if provider == "" || provider == config.StorageProviderNoop {
+	switch provider {
+	case "", config.StorageProviderNoop:
 		return NewNoopStorage(cfg.CDNDomain), nil
-	}
-	if provider == config.StorageProviderQiniu {
+	case config.StorageProviderLocal:
+		return NewLocalStorage(cfg)
+	case config.StorageProviderQiniu:
 		return NewQiniuStorage(cfg)
+	default:
+		return nil, fmt.Errorf("storage: unsupported provider %q", cfg.Provider)
 	}
-	return nil, fmt.Errorf("storage: unsupported provider %q", cfg.Provider)
 }
 
 // MaxBytesForScene 返回指定上传场景允许的最大文件字节数。
