@@ -31,7 +31,7 @@ const (
 	uploadTokenTTL    = 10 * time.Minute
 	imageInfoTimeout  = 5 * time.Second
 	maxImageInfoBytes = 8192
-	qiniuThumbQuery   = "imageView2/2/w/800/format/webp/q/80"
+	qiniuThumbQuery   = "imageView2/2/w/800/h/1400/format/webp/q/80"
 )
 
 var (

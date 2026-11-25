@@ -11,13 +11,13 @@ import (
 )
 
 const (
-	wallpaperMinLongEdge  uint32 = 1280
-	wallpaperMinShortEdge uint32 = 480
-	wallpaperMaxAspect           = 4.0
-	avatarMinEdge         uint32 = 100
-	avatarMaxEdge         uint32 = 4096
-	iconMinEdge           uint32 = 32
-	iconMaxEdge           uint32 = 2048
+	wallpaperMinEdge   uint32 = 100
+	wallpaperMaxEdge   uint32 = 16384
+	wallpaperMaxPixels uint64 = 100_000_000
+	avatarMinEdge      uint32 = 100
+	avatarMaxEdge      uint32 = 4096
+	iconMinEdge        uint32 = 32
+	iconMaxEdge        uint32 = 2048
 )
 
 // UploadService 负责七牛客户端直传凭证签发。
@@ -96,10 +96,10 @@ func verifyWallpaperObject(ctx context.Context, store storage.StorageService, us
 		return nil, err
 	}
 
-	longEdge := max(meta.Width, meta.Height)
-	shortEdge := min(meta.Width, meta.Height)
-	if longEdge < wallpaperMinLongEdge || shortEdge < wallpaperMinShortEdge || float64(longEdge)/float64(shortEdge) > wallpaperMaxAspect {
-		return nil, errno.ErrUploadVerifyFailed.WithMessage("壁纸分辨率或宽高比不符合要求")
+	if meta.Width < wallpaperMinEdge || meta.Height < wallpaperMinEdge ||
+		meta.Width > wallpaperMaxEdge || meta.Height > wallpaperMaxEdge ||
+		uint64(meta.Width)*uint64(meta.Height) > wallpaperMaxPixels {
+		return nil, errno.ErrUploadVerifyFailed.WithMessage("图片分辨率需在 100×100 至 16384×16384 且总像素不超过 1 亿")
 	}
 	return meta, nil
 }
