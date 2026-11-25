@@ -76,9 +76,11 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.GET("/:id/followers", authOptional, deps.FollowHandler.ListFollowers)
 		}
 
-		// M2 + M3 + M6: 标签、直传凭证、作品流与互动
+		// M2 + M3 + M6: 标签、直传凭证（含本地直传/读取端点）、作品流与互动
 		v1.GET("/tags", deps.MetaHandler.ListTags)
 		v1.POST("/uploads/token", authRequired, deps.UploadHandler.CreateUploadToken)
+		v1.POST("/uploads/local", deps.UploadHandler.UploadLocalFile)
+		v1.GET("/uploads/files/*filepath", deps.UploadHandler.ServeLocalFile)
 
 		wallpapers := v1.Group("/wallpapers")
 		{

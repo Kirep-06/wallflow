@@ -17,8 +17,8 @@ import (
 
 const (
 	httpReadHeaderTimeout = 5 * time.Second
-	httpReadTimeout       = 10 * time.Second
-	httpWriteTimeout      = 15 * time.Second
+	httpReadTimeout       = 60 * time.Second
+	httpWriteTimeout      = 60 * time.Second
 	httpIdleTimeout       = 60 * time.Second
 	httpShutdownTimeout   = 10 * time.Second
 	relayShutdownTimeout  = 10 * time.Second

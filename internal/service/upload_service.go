@@ -30,6 +30,15 @@ func NewUploadService(store storage.StorageService) *UploadService {
 	return &UploadService{store: store}
 }
 
+// LocalStorage 当存储驱动为 local 时返回本地存储实例，否则返回 nil。
+func (s *UploadService) LocalStorage() *storage.LocalStorage {
+	if s == nil {
+		return nil
+	}
+	ls, _ := s.store.(*storage.LocalStorage)
+	return ls
+}
+
 // CreateUploadToken 校验上传参数并签发锁定唯一 object_key 的短时直传凭证。
 func (s *UploadService) CreateUploadToken(ctx context.Context, userID uint64, req model.UploadTokenRequest) (*model.UploadTokenResult, error) {
 	scene := storage.UploadScene(strings.TrimSpace(req.Scene))
