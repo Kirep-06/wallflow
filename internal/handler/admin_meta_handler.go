@@ -12,7 +12,7 @@ import (
 	"wallpaper-feed/internal/service"
 )
 
-// AdminMetaHandler 处理管理后台的管理员身份核验与分类/话题（标签）增删改查接口。
+// AdminMetaHandler 处理管理后台的管理员身份核验与标签增删改查接口。
 type AdminMetaHandler struct {
 	svc *service.AdminMetaService
 }
@@ -34,74 +34,6 @@ func (h *AdminMetaHandler) GetMe(c *gin.Context) {
 		"username": user.Username,
 		"nickname": user.Nickname,
 	})
-}
-
-// ListCategories 处理 GET /api/v1/admin/categories。
-func (h *AdminMetaHandler) ListCategories(c *gin.Context) {
-	res, err := h.svc.ListCategories(c.Request.Context())
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, res)
-}
-
-// CreateCategory 处理 POST /api/v1/admin/categories。
-func (h *AdminMetaHandler) CreateCategory(c *gin.Context) {
-	var req model.AdminCreateCategoryRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
-		response.Fail(c, err)
-		return
-	}
-	res, err := h.svc.CreateCategory(c.Request.Context(), middleware.GetUserID(c), req)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, res)
-}
-
-// UpdateCategory 处理 PATCH /api/v1/admin/categories/:id。
-func (h *AdminMetaHandler) UpdateCategory(c *gin.Context) {
-	id, err := parsePositiveUint64(c.Param("id"), "分类 ID 非法")
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	var req model.AdminUpdateCategoryRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
-		response.Fail(c, err)
-		return
-	}
-	res, err := h.svc.UpdateCategory(c.Request.Context(), middleware.GetUserID(c), id, req)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, res)
-}
-
-// DeleteCategory 处理 DELETE /api/v1/admin/categories/:id?migrate_to=<target_id>。
-func (h *AdminMetaHandler) DeleteCategory(c *gin.Context) {
-	id, err := parsePositiveUint64(c.Param("id"), "分类 ID 非法")
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	var migrateToID uint64
-	if raw := strings.TrimSpace(c.Query("migrate_to")); raw != "" {
-		parsed, err := parsePositiveUint64(raw, "migrate_to 参数非法")
-		if err != nil {
-			response.Fail(c, err)
-			return
-		}
-		migrateToID = parsed
-	}
-	if err := h.svc.DeleteCategory(c.Request.Context(), id, migrateToID); err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, gin.H{"deleted": true})
 }
 
 // ListTags 处理 GET /api/v1/admin/tags。
@@ -137,7 +69,7 @@ func (h *AdminMetaHandler) CreateTag(c *gin.Context) {
 
 // UpdateTag 处理 PATCH /api/v1/admin/tags/:id。
 func (h *AdminMetaHandler) UpdateTag(c *gin.Context) {
-	id, err := parsePositiveUint64(c.Param("id"), "话题 ID 非法")
+	id, err := parsePositiveUint64(c.Param("id"), "标签 ID 非法")
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -157,7 +89,7 @@ func (h *AdminMetaHandler) UpdateTag(c *gin.Context) {
 
 // DeleteTag 处理 DELETE /api/v1/admin/tags/:id。
 func (h *AdminMetaHandler) DeleteTag(c *gin.Context) {
-	id, err := parsePositiveUint64(c.Param("id"), "话题 ID 非法")
+	id, err := parsePositiveUint64(c.Param("id"), "标签 ID 非法")
 	if err != nil {
 		response.Fail(c, err)
 		return

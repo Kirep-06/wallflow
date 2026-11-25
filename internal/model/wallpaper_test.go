@@ -27,30 +27,3 @@ func TestCalcOrientation(t *testing.T) {
 		})
 	}
 }
-
-func TestIs4KResolution(t *testing.T) {
-	tests := []struct {
-		name   string
-		width  uint32
-		height uint32
-		want   bool
-	}{
-		{name: "landscape 4K exact", width: 3840, height: 2160, want: true},
-		{name: "portrait 4K exact", width: 2160, height: 3840, want: true},
-		{name: "DCI 4K", width: 4096, height: 2160, want: true},
-		{name: "square 4K", width: 4000, height: 4000, want: true},
-		{name: "ultrawide 3840x1600 short edge below 2160", width: 3840, height: 1600, want: false},
-		{name: "landscape one pixel short on height", width: 3840, height: 2159, want: false},
-		{name: "landscape one pixel short on width", width: 3839, height: 2160, want: false},
-		{name: "portrait one pixel short on width", width: 2159, height: 3840, want: false},
-		{name: "2K QHD", width: 2560, height: 1440, want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := Is4KResolution(tc.width, tc.height); got != tc.want {
-				t.Fatalf("Is4KResolution(%d, %d) = %v, want %v", tc.width, tc.height, got, tc.want)
-			}
-		})
-	}
-}

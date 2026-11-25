@@ -76,8 +76,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 			users.GET("/:id/followers", authOptional, deps.FollowHandler.ListFollowers)
 		}
 
-		// M2 + M3 + M6: 分类、标签、直传凭证、壁纸画廊与互动
-		v1.GET("/categories", deps.MetaHandler.ListCategories)
+		// M2 + M3 + M6: 标签、直传凭证、作品流与互动
 		v1.GET("/tags", deps.MetaHandler.ListTags)
 		v1.POST("/uploads/token", authRequired, deps.UploadHandler.CreateUploadToken)
 
@@ -103,15 +102,11 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		v1.GET("/feed/following", authRequired, deps.FeedHandler.ListFollowingFeed)
 		v1.GET("/feed/hot", authOptional, deps.FeedHandler.ListHotFeed)
 
-		// 管理后台：分类与话题（标签）管理（白名单管理员鉴权）
+		// 管理后台：标签管理（白名单管理员鉴权）
 		if deps.AdminMetaHandler != nil {
 			admin := v1.Group("/admin", authRequired, middleware.AdminRequired(deps.AdminMetaService))
 			{
 				admin.GET("/me", deps.AdminMetaHandler.GetMe)
-				admin.GET("/categories", deps.AdminMetaHandler.ListCategories)
-				admin.POST("/categories", deps.AdminMetaHandler.CreateCategory)
-				admin.PATCH("/categories/:id", deps.AdminMetaHandler.UpdateCategory)
-				admin.DELETE("/categories/:id", deps.AdminMetaHandler.DeleteCategory)
 				admin.GET("/tags", deps.AdminMetaHandler.ListTags)
 				admin.POST("/tags", deps.AdminMetaHandler.CreateTag)
 				admin.PATCH("/tags/:id", deps.AdminMetaHandler.UpdateTag)

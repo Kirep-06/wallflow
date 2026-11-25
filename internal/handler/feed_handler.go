@@ -38,7 +38,7 @@ func (h *FeedHandler) ListFollowingFeed(c *gin.Context) {
 	response.OK(c, res)
 }
 
-// ListHotFeed 处理 GET /api/v1/feed/hot（AuthOptional，支持按 category_id 查模块专属 TopN 热榜及全站首屏弱 ETag / 304 协商）。
+// ListHotFeed 处理 GET /api/v1/feed/hot（AuthOptional，支持按 tag_id 查单标签 TopN 热榜及全站首屏弱 ETag / 304 协商）。
 func (h *FeedHandler) ListHotFeed(c *gin.Context) {
 	limit, err := cursor.ParseLimit(c.Query("limit"), cursor.DefaultLimit, cursor.MaxLimit)
 	if err != nil {
@@ -47,15 +47,15 @@ func (h *FeedHandler) ListHotFeed(c *gin.Context) {
 	}
 
 	viewerID := middleware.GetUserID(c)
-	if rawCat := c.Query("category_id"); rawCat != "" {
-		catID, parseErr := parsePositiveUint64(rawCat, "category_id 参数非法")
+	if rawTag := c.Query("tag_id"); rawTag != "" {
+		tagID, parseErr := parsePositiveUint64(rawTag, "tag_id 参数非法")
 		if parseErr != nil {
 			response.Fail(c, parseErr)
 			return
 		}
-		page, catErr := h.feedSvc.ListCategoryHotFeed(c.Request.Context(), viewerID, catID, limit)
-		if catErr != nil {
-			response.Fail(c, catErr)
+		page, tagErr := h.feedSvc.ListTagHotFeed(c.Request.Context(), viewerID, tagID, limit)
+		if tagErr != nil {
+			response.Fail(c, tagErr)
 			return
 		}
 		c.Header("Cache-Control", "private, no-store")

@@ -314,7 +314,6 @@ func (s *benchSuite) directMySQLDetail(ctx context.Context, id uint64) (*model.W
 			Width:       im.Width,
 			Height:      im.Height,
 			Orientation: im.Orientation,
-			Is4K:        im.Is4K,
 			SizeBytes:   im.SizeBytes,
 		})
 	}
@@ -327,10 +326,8 @@ func (s *benchSuite) directMySQLDetail(ctx context.Context, id uint64) (*model.W
 		Width:       snap.Width,
 		Height:      snap.Height,
 		Orientation: snap.Orientation,
-		Is4K:        snap.Is4K,
 		SizeBytes:   snap.SizeBytes,
 		Images:      imgs,
-		Category:    snap.Category,
 		Tags:        snap.Tags,
 		Author: model.WallpaperAuthor{
 			ID:        authorRow.ID,
@@ -393,8 +390,7 @@ func (s *benchSuite) directMySQLSummaries(ctx context.Context, ids []uint64) ([]
 			Width:         d.Width,
 			Height:        d.Height,
 			Orientation:   d.Orientation,
-			Is4K:          d.Is4K,
-			Category:      d.Category,
+			Tags:          d.Tags,
 			Author:        model.WallpaperAuthor{ID: au.ID, Username: au.Username, Nickname: au.Nickname, AvatarURL: s.store.BuildRawURL(au.AvatarKey)},
 			LikeCount:     st.LikeCount,
 			FavCount:      st.FavCount,

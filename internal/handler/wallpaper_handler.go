@@ -20,14 +20,9 @@ func NewWallpaperHandler(wallpaperSvc *service.WallpaperService) *WallpaperHandl
 	return &WallpaperHandler{wallpaperSvc: wallpaperSvc}
 }
 
-// ListWallpapers 处理 GET /api/v1/wallpapers（最新流与分类/标签单维互斥筛选）。
+// ListWallpapers 处理 GET /api/v1/wallpapers（最新流与单标签筛选）。
 func (h *WallpaperHandler) ListWallpapers(c *gin.Context) {
 	limit, err := cursor.ParseLimit(c.Query("limit"), cursor.DefaultLimit, cursor.MaxLimit)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	categoryID, err := parseOptionalPositiveUint64(c.Query("category_id"), "category_id 格式不合法")
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -39,10 +34,9 @@ func (h *WallpaperHandler) ListWallpapers(c *gin.Context) {
 	}
 
 	res, err := h.wallpaperSvc.ListWallpapers(c.Request.Context(), model.WallpaperListQuery{
-		Cursor:     c.Query("cursor"),
-		Limit:      limit,
-		CategoryID: categoryID,
-		TagID:      tagID,
+		Cursor: c.Query("cursor"),
+		Limit:  limit,
+		TagID:  tagID,
 	}, middleware.GetUserID(c))
 	if err != nil {
 		response.Fail(c, err)

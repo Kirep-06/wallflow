@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,14 +29,11 @@ const (
 
 	maxWallpaperTitleRunes = 80
 	maxWallpaperDescRunes  = 500
-	maxWallpaperTags       = 5
+	maxWallpaperTags       = 10
 	maxTagNameRunes        = 24
 )
 
-var (
-	categoryIDPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
-	likePrefixEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-)
+var likePrefixEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // WallpaperDetailL2TTL 按壁纸发布时间计算冷热动态 L2 TTL（7 天内热图 1h，7 天外冷图 10m）。
 func WallpaperDetailL2TTL(wp model.WallpaperDetailCache) time.Duration {
@@ -137,45 +133,6 @@ func NewWallpaperService(
 	return s
 }
 
-// ListCategories 直查全站两级壁纸分类列表（含各板块简介与汇总统计，大类自动汇总子小类数据）。
-func (s *WallpaperService) ListCategories(ctx context.Context) (*model.CategoryList, error) {
-	cats, err := s.metaRepo.ListCategories(ctx)
-	if err != nil {
-		return nil, errno.ErrInternal.Wrap(err)
-	}
-	rawStats, err := s.metaRepo.QueryCategoryStats(ctx)
-	if err != nil {
-		return nil, errno.ErrInternal.Wrap(err)
-	}
-
-	// 将二级小分类的统计向上聚合到对应一级大分类（大类本身直挂的壁纸也计入）
-	rolled := make(map[uint64]repository.CategoryStats, len(cats))
-	for id, st := range rawStats {
-		rolled[id] = st
-	}
-	for i := range cats {
-		if cats[i].ParentID > 0 {
-			childSt := rawStats[cats[i].ID]
-			parentSt := rolled[cats[i].ParentID]
-			parentSt.WallpaperCount += childSt.WallpaperCount
-			parentSt.WeeklyNewCount += childSt.WeeklyNewCount
-			parentSt.DownloadCount += childSt.DownloadCount
-			rolled[cats[i].ParentID] = parentSt
-		}
-	}
-
-	items := make([]model.CategoryItem, 0, len(cats))
-	for i := range cats {
-		item := cats[i].ToItem(s.store.BuildRawURL(cats[i].IconKey))
-		st := rolled[cats[i].ID]
-		item.WallpaperCount = st.WallpaperCount
-		item.WeeklyNewCount = st.WeeklyNewCount
-		item.DownloadCount = st.DownloadCount
-		items = append(items, item)
-	}
-	return &model.CategoryList{Items: items}, nil
-}
-
 // ListTags 直查热门标签或按前缀联想检索标签。
 func (s *WallpaperService) ListTags(ctx context.Context, rawQuery string, limit int) (*model.TagList, error) {
 	q := strings.ToLower(strings.TrimSpace(rawQuery))
@@ -203,17 +160,13 @@ func (s *WallpaperService) ListTags(ctx context.Context, rawQuery string, limit 
 	return &model.TagList{Items: items}, nil
 }
 
-// CreateWallpaper 执行事务外参数/归属/?imageInfo 核验与方向/4K 计算，并在短事务内入库发布。
+// CreateWallpaper 执行事务外参数/归属/?imageInfo 核验与方向计算，并在短事务内入库发布。
 func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, req model.CreateWallpaperRequest) (*model.WallpaperDetail, error) {
 	title, err := validateWallpaperTitle(req.Title)
 	if err != nil {
 		return nil, err
 	}
 	desc, err := validateWallpaperDescription(req.Description)
-	if err != nil {
-		return nil, err
-	}
-	categoryID, err := parseCategoryID(req.CategoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -227,14 +180,6 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		return nil, err
 	}
 
-	category, err := s.metaRepo.FindCategoryByID(ctx, categoryID)
-	if err != nil {
-		if errors.Is(err, repository.ErrCategoryNotFound) {
-			return nil, errno.ErrInvalidCategoryOrTag.WithMessage("指定分类不存在")
-		}
-		return nil, errno.ErrInternal.Wrap(err)
-	}
-
 	imageModels := make([]model.WallpaperImage, 0, len(objectKeys))
 	imageItems := make([]model.WallpaperImageItem, 0, len(objectKeys))
 	for idx, key := range objectKeys {
@@ -243,18 +188,12 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 			return nil, verifyErr
 		}
 		orient := model.CalcOrientation(meta.Width, meta.Height)
-		is4K := model.Is4KResolution(meta.Width, meta.Height)
-		var is4KFlag uint8
-		if is4K {
-			is4KFlag = 1
-		}
 		imageModels = append(imageModels, model.WallpaperImage{
 			SortNo:      uint32(idx),
 			ObjectKey:   key,
 			Width:       meta.Width,
 			Height:      meta.Height,
 			Orientation: orient,
-			Is4K:        is4KFlag,
 			SizeBytes:   uint64(meta.SizeBytes),
 		})
 		mime, _ := storage.MimeFromObjectKey(key)
@@ -265,7 +204,6 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 			Width:       meta.Width,
 			Height:      meta.Height,
 			Orientation: orient,
-			Is4K:        is4K,
 			SizeBytes:   uint64(meta.SizeBytes),
 			Mime:        mime,
 		})
@@ -274,14 +212,12 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 	cover := imageModels[0]
 	wp := &model.Wallpaper{
 		UserID:      userID,
-		CategoryID:  category.ID,
 		Title:       title,
 		Description: desc,
 		ObjectKey:   cover.ObjectKey,
 		Width:       cover.Width,
 		Height:      cover.Height,
 		Orientation: cover.Orientation,
-		Is4K:        cover.Is4K,
 		SizeBytes:   cover.SizeBytes,
 		Status:      model.WallpaperStatusActive,
 	}
@@ -326,14 +262,12 @@ func (s *WallpaperService) CreateWallpaper(ctx context.Context, userID uint64, r
 		Width:         wp.Width,
 		Height:        wp.Height,
 		Orientation:   wp.Orientation,
-		Is4K:          cover.Is4K == 1,
 		SizeBytes:     wp.SizeBytes,
 		Mime:          imageItems[0].Mime,
 		LikeCount:     0, // M6 由 wallpaper_stats 承载，新发布恒为 0
 		FavCount:      0,
 		DownloadCount: 0,
 		CommentCount:  0,
-		Category:      category.ToItem(s.store.BuildRawURL(category.IconKey)),
 		Tags:          tagItems,
 		Images:        imageItems,
 		Author:        author,
@@ -440,7 +374,6 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, 
 		Width:         cached.Width,
 		Height:        cached.Height,
 		Orientation:   cached.Orientation,
-		Is4K:          cached.Is4K,
 		SizeBytes:     cached.SizeBytes,
 		Mime:          mime,
 		LikeCount:     stats.LikeCount,
@@ -449,7 +382,6 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, 
 		CommentCount:  stats.CommentCount,
 		IsLiked:       isLiked,
 		IsFavorited:   isFavorited,
-		Category:      cached.Category,
 		Tags:          tags,
 		Images:        s.buildImageItems(cached),
 		Author:        author,
@@ -457,11 +389,8 @@ func (s *WallpaperService) GetWallpaperDetail(ctx context.Context, wallpaperID, 
 	}, nil
 }
 
-// ListWallpapers 返回发现页最新流（热窗口冷热分离）或按分类/标签单维互斥筛选的画廊瀑布流。
+// ListWallpapers 返回发现页最新流（热窗口冷热分离）或按单标签筛选的作品流。
 func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.WallpaperListQuery, viewerID uint64) (*response.PageData[model.WallpaperSummary], error) {
-	if query.CategoryID > 0 && query.TagID > 0 {
-		return nil, errno.ErrInvalidParam.WithMessage("category_id 与 tag_id 不能同时传入")
-	}
 	limit, err := normalizeListLimit(query.Limit)
 	if err != nil {
 		return nil, err
@@ -473,16 +402,9 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 
 	want := limit + 1
 	var rawIDs []uint64
-	switch {
-	case query.CategoryID > 0:
-		scopeIDs, scopeErr := s.resolveCategoryScope(ctx, query.CategoryID)
-		if scopeErr != nil {
-			return nil, errno.ErrInternal.Wrap(scopeErr)
-		}
-		rawIDs, err = s.wallpaperRepo.ListCategoriesWallpaperIDs(ctx, scopeIDs, beforeID, want)
-	case query.TagID > 0:
+	if query.TagID > 0 {
 		rawIDs, err = s.wallpaperRepo.ListTagWallpaperIDs(ctx, query.TagID, beforeID, want)
-	default:
+	} else {
 		rawIDs, err = s.fetchLatestPageIDs(ctx, beforeID, want)
 	}
 	if err != nil {
@@ -496,32 +418,17 @@ func (s *WallpaperService) ListWallpapers(ctx context.Context, query model.Wallp
 	return s.assembleSummaryPage(ctx, pageIDs, nextCursor, hasMore, summaryAssembleOpts{viewerID: viewerID})
 }
 
-// ListCategoryHot 返回指定大分类（含子小类）或小分类内的 TopN 热门壁纸列表。
-func (s *WallpaperService) ListCategoryHot(ctx context.Context, viewerID, categoryID uint64, rawLimit int) (*response.PageData[model.WallpaperSummary], error) {
+// ListTagHot 返回指定标签内的 TopN 热门作品列表。
+func (s *WallpaperService) ListTagHot(ctx context.Context, viewerID, tagID uint64, rawLimit int) (*response.PageData[model.WallpaperSummary], error) {
 	limit, err := normalizeListLimit(rawLimit)
 	if err != nil {
 		return nil, err
 	}
-	scopeIDs, err := s.resolveCategoryScope(ctx, categoryID)
-	if err != nil {
-		return nil, errno.ErrInternal.Wrap(err)
-	}
-	ids, err := s.wallpaperRepo.ListHotIDsByCategories(ctx, scopeIDs, limit)
+	ids, err := s.wallpaperRepo.ListHotIDsByTag(ctx, tagID, limit)
 	if err != nil {
 		return nil, errno.ErrInternal.Wrap(err)
 	}
 	return s.assembleSummaryPage(ctx, ids, "", false, summaryAssembleOpts{viewerID: viewerID})
-}
-
-func (s *WallpaperService) resolveCategoryScope(ctx context.Context, categoryID uint64) ([]uint64, error) {
-	childIDs, err := s.metaRepo.ListChildCategoryIDs(ctx, categoryID)
-	if err != nil {
-		return nil, err
-	}
-	scope := make([]uint64, 0, 1+len(childIDs))
-	scope = append(scope, categoryID)
-	scope = append(scope, childIDs...)
-	return scope, nil
 }
 
 // ListUserWallpapers 返回指定创作者公开主页的已发布壁纸流（用户不存在返回 404/20003）。
@@ -782,6 +689,11 @@ func (s *WallpaperService) assembleSummaryPage(
 			_, isFavorited = favSet[wp.ID]
 		}
 
+		tags := wp.Tags
+		if tags == nil {
+			tags = []model.TagItem{}
+		}
+
 		items = append(items, model.WallpaperSummary{
 			ID:            wp.ID,
 			Title:         wp.Title,
@@ -790,7 +702,6 @@ func (s *WallpaperService) assembleSummaryPage(
 			Width:         wp.Width,
 			Height:        wp.Height,
 			Orientation:   wp.Orientation,
-			Is4K:          wp.Is4K,
 			HotScore:      opts.hotScores[wp.ID],
 			LikeCount:     stats.LikeCount,
 			FavCount:      stats.FavCount,
@@ -798,7 +709,7 @@ func (s *WallpaperService) assembleSummaryPage(
 			CommentCount:  stats.CommentCount,
 			IsLiked:       isLiked,
 			IsFavorited:   isFavorited,
-			Category:      wp.Category,
+			Tags:          tags,
 			Images:        s.buildImageItems(wp),
 			Author:        author,
 			CreatedAt:     wp.CreatedAt.UTC(),
@@ -821,7 +732,6 @@ func (s *WallpaperService) buildImageItems(cached model.WallpaperDetailCache) []
 				Width:       cached.Width,
 				Height:      cached.Height,
 				Orientation: cached.Orientation,
-				Is4K:        cached.Is4K,
 				SizeBytes:   cached.SizeBytes,
 				Mime:        mime,
 			},
@@ -838,7 +748,6 @@ func (s *WallpaperService) buildImageItems(cached model.WallpaperDetailCache) []
 			Width:       img.Width,
 			Height:      img.Height,
 			Orientation: img.Orientation,
-			Is4K:        img.Is4K,
 			SizeBytes:   img.SizeBytes,
 			Mime:        mime,
 		})
@@ -987,20 +896,9 @@ func validateWallpaperDescription(raw string) (string, error) {
 	return desc, nil
 }
 
-func parseCategoryID(raw string) (uint64, error) {
-	if !categoryIDPattern.MatchString(raw) {
-		return 0, errno.ErrInvalidParam.WithMessage("category_id 格式不合法")
-	}
-	id, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || id == 0 {
-		return 0, errno.ErrInvalidParam.WithMessage("category_id 格式不合法")
-	}
-	return id, nil
-}
-
 func normalizeAndValidateTags(rawTags []string) ([]string, error) {
 	if len(rawTags) > maxWallpaperTags {
-		return nil, errno.ErrInvalidCategoryOrTag.WithMessage("标签数量最多 5 个")
+		return nil, errno.ErrInvalidTag.WithMessage("标签数量最多 10 个")
 	}
 	if len(rawTags) == 0 {
 		return []string{}, nil
@@ -1012,11 +910,11 @@ func normalizeAndValidateTags(rawTags []string) ([]string, error) {
 		name := strings.ToLower(strings.TrimSpace(raw))
 		n := utf8.RuneCountInString(name)
 		if n < 1 || n > maxTagNameRunes {
-			return nil, errno.ErrInvalidCategoryOrTag.WithMessage("单个标签长度需为 1~24 个字符")
+			return nil, errno.ErrInvalidTag.WithMessage("单个标签长度需为 1~24 个字符")
 		}
 		for _, r := range name {
 			if unicode.IsSpace(r) || r == ',' || r == '，' || unicode.IsControl(r) {
-				return nil, errno.ErrInvalidCategoryOrTag.WithMessage("标签不能包含空白符、逗号或控制字符")
+				return nil, errno.ErrInvalidTag.WithMessage("标签不能包含空白符、逗号或控制字符")
 			}
 		}
 		if _, dup := seen[name]; dup {

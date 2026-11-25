@@ -294,9 +294,9 @@ func (s *FeedService) ListFollowingFeed(
 	})
 }
 
-// ListCategoryHotFeed 返回指定大分类（含子小类）或小分类内的 TopN 热门壁纸列表。
-func (s *FeedService) ListCategoryHotFeed(ctx context.Context, viewerID, categoryID uint64, limit int) (*response.PageData[model.WallpaperSummary], error) {
-	return s.wallpaperSvc.ListCategoryHot(ctx, viewerID, categoryID, limit)
+// ListTagHotFeed 返回指定标签内的 TopN 热门作品列表。
+func (s *FeedService) ListTagHotFeed(ctx context.Context, viewerID, tagID uint64, limit int) (*response.PageData[model.WallpaperSummary], error) {
+	return s.wallpaperSvc.ListTagHot(ctx, viewerID, tagID, limit)
 }
 
 func (s *FeedService) fetchFollowingIDs(

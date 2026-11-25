@@ -39,7 +39,7 @@ var (
 var (
 	ErrUploadVerifyFailed   = &Error{Code: 30001, HTTPStatus: http.StatusBadRequest, Msg: "上传文件不存在或校验失败"}
 	ErrWallpaperNotFound    = &Error{Code: 30002, HTTPStatus: http.StatusNotFound, Msg: "壁纸不存在"}
-	ErrInvalidCategoryOrTag = &Error{Code: 30003, HTTPStatus: http.StatusBadRequest, Msg: "分类或标签不合法"}
+	ErrInvalidTag           = &Error{Code: 30003, HTTPStatus: http.StatusBadRequest, Msg: "标签不合法"}
 	ErrDuplicateObjectKey   = &Error{Code: 30004, HTTPStatus: http.StatusConflict, Msg: "该上传文件已发布，请勿重复提交"}
 )
 

@@ -40,7 +40,6 @@ func (r *WallpaperRepository) CreateWithTags(
 		Width:       wp.Width,
 		Height:      wp.Height,
 		Orientation: wp.Orientation,
-		Is4K:        wp.Is4K,
 		SizeBytes:   wp.SizeBytes,
 	}
 	return r.CreateWithTagsAndImages(ctx, wp, []model.WallpaperImage{defaultImg}, tagNames, buildOutbox)
@@ -221,7 +220,7 @@ func (r *WallpaperRepository) CountActiveByUserID(ctx context.Context, userID ui
 	return total, nil
 }
 
-// FindDetailsByIDs 按主键批量回源正常壁纸的静态详情快照（壁纸主表 + 分类 + 关联标签）。
+// FindDetailsByIDs 按主键批量回源正常作品的静态详情快照（作品主表 + 关联标签 + 图片列表）。
 func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64) (map[uint64]model.WallpaperDetailCache, error) {
 	if len(ids) == 0 {
 		return map[uint64]model.WallpaperDetailCache{}, nil
@@ -229,7 +228,7 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 
 	var wps []model.Wallpaper
 	if err := r.db.WithContext(ctx).
-		Select("id, user_id, category_id, title, description, object_key, width, height, orientation, is_4k, size_bytes, created_at").
+		Select("id, user_id, title, description, object_key, width, height, orientation, size_bytes, created_at").
 		Where("id IN ? AND status = ?", ids, model.WallpaperStatusActive).
 		Find(&wps).Error; err != nil {
 		return nil, fmt.Errorf("wallpaper repo find details by ids: %w", err)
@@ -239,26 +238,8 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 	}
 
 	wpIDs := make([]uint64, 0, len(wps))
-	catIDSet := make(map[uint64]struct{}, len(wps))
-	catIDs := make([]uint64, 0, len(wps))
 	for i := range wps {
 		wpIDs = append(wpIDs, wps[i].ID)
-		if _, exists := catIDSet[wps[i].CategoryID]; !exists {
-			catIDSet[wps[i].CategoryID] = struct{}{}
-			catIDs = append(catIDs, wps[i].CategoryID)
-		}
-	}
-
-	var cats []model.Category
-	if err := r.db.WithContext(ctx).
-		Select("id, parent_id, slug, name, description, sort_no, icon_key").
-		Where("id IN ?", catIDs).
-		Find(&cats).Error; err != nil {
-		return nil, fmt.Errorf("wallpaper repo find categories by ids: %w", err)
-	}
-	catByID := make(map[uint64]model.CategoryItem, len(cats))
-	for i := range cats {
-		catByID[cats[i].ID] = cats[i].ToItem()
 	}
 
 	type wallpaperTagRow struct {
@@ -302,7 +283,6 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 			Width:       img.Width,
 			Height:      img.Height,
 			Orientation: img.Orientation,
-			Is4K:        img.Is4K == 1,
 			SizeBytes:   img.SizeBytes,
 		})
 	}
@@ -324,7 +304,6 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 					Width:       w.Width,
 					Height:      w.Height,
 					Orientation: w.Orientation,
-					Is4K:        w.Is4K == 1,
 					SizeBytes:   w.SizeBytes,
 				},
 			}
@@ -332,16 +311,13 @@ func (r *WallpaperRepository) FindDetailsByIDs(ctx context.Context, ids []uint64
 		result[w.ID] = model.WallpaperDetailCache{
 			ID:          w.ID,
 			UserID:      w.UserID,
-			CategoryID:  w.CategoryID,
 			Title:       w.Title,
 			Description: w.Description,
 			ObjectKey:   w.ObjectKey,
 			Width:       w.Width,
 			Height:      w.Height,
 			Orientation: w.Orientation,
-			Is4K:        w.Is4K == 1,
 			SizeBytes:   w.SizeBytes,
-			Category:    catByID[w.CategoryID],
 			Tags:        tags,
 			Images:      imgs,
 			CreatedAt:   w.CreatedAt.UTC(),
@@ -376,44 +352,23 @@ func (r *WallpaperRepository) ListActiveIDsAfter(ctx context.Context, afterID ui
 	return ids, nil
 }
 
-// ListCategoryWallpaperIDs 命中覆盖索引 idx_status_category_id 倒序游标查询指定分类下的正常壁纸 ID。
-func (r *WallpaperRepository) ListCategoryWallpaperIDs(ctx context.Context, categoryID, beforeID uint64, limit int) ([]uint64, error) {
-	q := r.db.WithContext(ctx).
-		Table(model.Wallpaper{}.TableName()).
-		Where("status = ? AND category_id = ?", model.WallpaperStatusActive, categoryID)
-	return listWallpaperIDs(q, "id", beforeID, limit, "list category wallpaper ids")
-}
-
-// ListCategoriesWallpaperIDs 倒序游标查询多个分类（大类 + 其下所有小类）下的正常壁纸 ID。
-func (r *WallpaperRepository) ListCategoriesWallpaperIDs(ctx context.Context, categoryIDs []uint64, beforeID uint64, limit int) ([]uint64, error) {
-	if len(categoryIDs) == 0 || limit <= 0 {
-		return []uint64{}, nil
-	}
-	if len(categoryIDs) == 1 {
-		return r.ListCategoryWallpaperIDs(ctx, categoryIDs[0], beforeID, limit)
-	}
-	q := r.db.WithContext(ctx).
-		Table(model.Wallpaper{}.TableName()).
-		Where("status = ? AND category_id IN ?", model.WallpaperStatusActive, categoryIDs)
-	return listWallpaperIDs(q, "id", beforeID, limit, "list categories wallpaper ids")
-}
-
-// ListHotIDsByCategories 按互动加权热度降序返回指定分类集合内的 TopN 壁纸 ID。
-func (r *WallpaperRepository) ListHotIDsByCategories(ctx context.Context, categoryIDs []uint64, limit int) ([]uint64, error) {
-	if len(categoryIDs) == 0 || limit <= 0 {
+// ListHotIDsByTag 按互动加权热度降序返回指定标签内的 TopN 作品 ID。
+func (r *WallpaperRepository) ListHotIDsByTag(ctx context.Context, tagID uint64, limit int) ([]uint64, error) {
+	if tagID == 0 || limit <= 0 {
 		return []uint64{}, nil
 	}
 	ids := make([]uint64, 0, limit)
 	err := r.db.WithContext(ctx).
-		Table(model.Wallpaper{}.TableName()+" AS w").
+		Table(model.WallpaperTag{}.TableName()+" AS wt").
 		Select("w.id").
+		Joins("JOIN "+model.Wallpaper{}.TableName()+" AS w ON w.id = wt.wallpaper_id").
 		Joins("LEFT JOIN wallpaper_stats AS s ON s.wallpaper_id = w.id").
-		Where("w.status = ? AND w.category_id IN ?", model.WallpaperStatusActive, categoryIDs).
+		Where("wt.tag_id = ? AND w.status = ?", tagID, model.WallpaperStatusActive).
 		Order("(COALESCE(s.like_count, 0) * 18 + COALESCE(s.fav_count, 0) * 15 + COALESCE(s.download_count, 0) * 12 + COALESCE(s.comment_count, 0) * 10) DESC, w.id DESC").
 		Limit(limit).
 		Pluck("w.id", &ids).Error
 	if err != nil {
-		return nil, fmt.Errorf("wallpaper repo list hot ids by categories: %w", err)
+		return nil, fmt.Errorf("wallpaper repo list hot ids by tag: %w", err)
 	}
 	return ids, nil
 }

@@ -28,13 +28,21 @@ func TestNormalizeAndValidateTags(t *testing.T) {
 	})
 
 	t.Run("trim lowercase and deduplicate keeping first order", func(t *testing.T) {
-		got, err := normalizeAndValidateTags([]string{" 4K ", "赛博朋克", "4k", "夜景", "赛博朋克"})
+		got, err := normalizeAndValidateTags([]string{" Pixiv ", "赛博朋克", "pixiv", "夜景", "赛博朋克"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := []string{"4k", "赛博朋克", "夜景"}
+		want := []string{"pixiv", "赛博朋克", "夜景"}
 		if !slices.Equal(got, want) {
 			t.Fatalf("got = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("up to 10 tags allowed", func(t *testing.T) {
+		in := []string{"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10"}
+		got, err := normalizeAndValidateTags(in)
+		if err != nil || !slices.Equal(got, in) {
+			t.Fatalf("got = (%v, %v)", got, err)
 		}
 	})
 
@@ -51,7 +59,7 @@ func TestNormalizeAndValidateTags(t *testing.T) {
 			name string
 			tags []string
 		}{
-			{name: "more than 5 tags even with duplicates", tags: []string{"a", "b", "c", "d", "e", "a"}},
+			{name: "more than 10 tags even with duplicates", tags: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "a"}},
 			{name: "blank tag", tags: []string{"   "}},
 			{name: "over 24 runes", tags: []string{strings.Repeat("a", 25)}},
 			{name: "internal space", tags: []string{"cyber punk"}},
@@ -63,8 +71,8 @@ func TestNormalizeAndValidateTags(t *testing.T) {
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				if _, err := normalizeAndValidateTags(tc.tags); !errors.Is(err, errno.ErrInvalidCategoryOrTag) {
-					t.Fatalf("err = %v, want ErrInvalidCategoryOrTag", err)
+				if _, err := normalizeAndValidateTags(tc.tags); !errors.Is(err, errno.ErrInvalidTag) {
+					t.Fatalf("err = %v, want ErrInvalidTag", err)
 				}
 			})
 		}
@@ -88,29 +96,6 @@ func TestEscapeLikePrefix(t *testing.T) {
 	}
 }
 
-func TestParseCategoryID(t *testing.T) {
-	validTests := []struct {
-		in   string
-		want uint64
-	}{
-		{in: "1", want: 1},
-		{in: "10001", want: 10001},
-	}
-	for _, tc := range validTests {
-		got, err := parseCategoryID(tc.in)
-		if err != nil || got != tc.want {
-			t.Fatalf("parseCategoryID(%q) = (%d, %v), want (%d, nil)", tc.in, got, err, tc.want)
-		}
-	}
-
-	invalidInputs := []string{"", "0", "01", "-1", " 1 ", "1a", "999999999999999999999"}
-	for _, in := range invalidInputs {
-		if _, err := parseCategoryID(in); !errors.Is(err, errno.ErrInvalidParam) {
-			t.Fatalf("parseCategoryID(%q) err = %v, want ErrInvalidParam", in, err)
-		}
-	}
-}
-
 func TestWallpaperServicePreDBValidation(t *testing.T) {
 	svc := NewWallpaperService(nil, nil, nil, nil, nil, &stubStorage{})
 	validKey := "wallpapers/10/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp"
@@ -122,32 +107,27 @@ func TestWallpaperServicePreDBValidation(t *testing.T) {
 	}{
 		{
 			name:    "empty title",
-			req:     model.CreateWallpaperRequest{Title: "   ", CategoryID: "1", ObjectKey: validKey},
+			req:     model.CreateWallpaperRequest{Title: "   ", ObjectKey: validKey},
 			wantErr: errno.ErrInvalidParam,
 		},
 		{
 			name:    "title over 80 runes",
-			req:     model.CreateWallpaperRequest{Title: strings.Repeat("星", 81), CategoryID: "1", ObjectKey: validKey},
+			req:     model.CreateWallpaperRequest{Title: strings.Repeat("星", 81), ObjectKey: validKey},
 			wantErr: errno.ErrInvalidParam,
 		},
 		{
 			name:    "description over 500 runes",
-			req:     model.CreateWallpaperRequest{Title: "ok", Description: strings.Repeat("字", 501), CategoryID: "1", ObjectKey: validKey},
-			wantErr: errno.ErrInvalidParam,
-		},
-		{
-			name:    "invalid category_id format",
-			req:     model.CreateWallpaperRequest{Title: "ok", CategoryID: "01", ObjectKey: validKey},
+			req:     model.CreateWallpaperRequest{Title: "ok", Description: strings.Repeat("字", 501), ObjectKey: validKey},
 			wantErr: errno.ErrInvalidParam,
 		},
 		{
 			name:    "invalid tags before db",
-			req:     model.CreateWallpaperRequest{Title: "ok", CategoryID: "1", Tags: []string{"bad tag"}, ObjectKey: validKey},
-			wantErr: errno.ErrInvalidCategoryOrTag,
+			req:     model.CreateWallpaperRequest{Title: "ok", Tags: []string{"bad tag"}, ObjectKey: validKey},
+			wantErr: errno.ErrInvalidTag,
 		},
 		{
 			name:    "foreign object_key before db",
-			req:     model.CreateWallpaperRequest{Title: "ok", CategoryID: "1", ObjectKey: "wallpapers/99/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp"},
+			req:     model.CreateWallpaperRequest{Title: "ok", ObjectKey: "wallpapers/99/20261122/9f3c2e8a4b1d4a7c8e5f1a2b3c4d5e6f.webp"},
 			wantErr: errno.ErrInvalidParam,
 		},
 	}
@@ -177,15 +157,6 @@ func TestWallpaperDetailL2TTL(t *testing.T) {
 func TestListWallpapersValidation(t *testing.T) {
 	svc := NewWallpaperService(nil, nil, nil, nil, nil, &stubStorage{})
 	ctx := context.Background()
-
-	// category_id 与 tag_id 单维互斥，同时传入返回 10002。
-	if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{
-		CategoryID: 1,
-		TagID:      2,
-		Limit:      20,
-	}, 0); !errors.Is(err, errno.ErrInvalidParam) {
-		t.Fatalf("both category_id and tag_id err = %v, want ErrInvalidParam", err)
-	}
 
 	// limit 越界返回 10002。
 	if _, err := svc.ListWallpapers(ctx, model.WallpaperListQuery{Limit: 51}, 0); !errors.Is(err, errno.ErrInvalidParam) {
@@ -295,15 +266,16 @@ func TestAssembleSummaryPage_SkipsGhostIDsAndFallbackAuthor(t *testing.T) {
 	})
 	svc := NewWallpaperService(nil, nil, userSvc, wallpaperCache, nil, store)
 
-	// 预灌缓存：壁纸 10（正常作者 1）、壁纸 9（幽灵空值哨兵）、壁纸 8（作者 2 缺失空值哨兵）。
+	// 预灌缓存：作品 10（正常作者 1 + 标签）、作品 9（幽灵空值哨兵）、作品 8（作者 2 缺失空值哨兵）。
 	wp10, _ := json.Marshal(model.WallpaperDetailCache{
-		ID: 10, UserID: 1, CategoryID: 3, Title: "neon", ObjectKey: "wallpapers/1/20261122/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
-		Width: 3840, Height: 2160, Orientation: 1, Is4K: true, Category: model.CategoryItem{ID: 3, Slug: "cyberpunk", Name: "赛博科幻"},
+		ID: 10, UserID: 1, Title: "neon", ObjectKey: "wallpapers/1/20261122/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
+		Width: 3840, Height: 2160, Orientation: 1,
+		Tags:      []model.TagItem{{ID: 5, Name: "cyberpunk", UseCount: 12}},
 		CreatedAt: time.Now().UTC(),
 	})
 	wp8, _ := json.Marshal(model.WallpaperDetailCache{
-		ID: 8, UserID: 2, CategoryID: 3, Title: "rain", ObjectKey: "wallpapers/2/20261122/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
-		Width: 1920, Height: 1080, Orientation: 1, Is4K: false, Category: model.CategoryItem{ID: 3, Slug: "cyberpunk", Name: "赛博科幻"},
+		ID: 8, UserID: 2, Title: "rain", ObjectKey: "wallpapers/2/20261122/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
+		Width: 800, Height: 1131, Orientation: 2,
 		CreatedAt: time.Now().UTC(),
 	})
 	u1, _ := json.Marshal(model.UserProfileCache{ID: 1, Username: "alice", Nickname: "爱丽丝", AvatarKey: "avatars/1/20261122/cccccccccccccccccccccccccccccccc.png"})
@@ -326,6 +298,12 @@ func TestAssembleSummaryPage_SkipsGhostIDsAndFallbackAuthor(t *testing.T) {
 	}
 	if page.Items[0].Author.Nickname != "爱丽丝" {
 		t.Fatalf("item[0] author = %+v", page.Items[0].Author)
+	}
+	if len(page.Items[0].Tags) != 1 || page.Items[0].Tags[0].Name != "cyberpunk" {
+		t.Fatalf("item[0] tags = %+v, want [cyberpunk]", page.Items[0].Tags)
+	}
+	if page.Items[1].Tags == nil || len(page.Items[1].Tags) != 0 {
+		t.Fatalf("item[1] tags = %+v, want empty non-nil slice", page.Items[1].Tags)
 	}
 	// 作者 2 异常缺失时回退为安全占位而不是拖垮整页。
 	if page.Items[1].Author.ID != 2 || !strings.Contains(page.Items[1].Author.AvatarURL, defaultAvatarKey) {

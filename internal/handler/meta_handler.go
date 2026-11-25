@@ -8,24 +8,14 @@ import (
 	"wallpaper-feed/internal/service"
 )
 
-// MetaHandler 处理 M2 分类与标签公开查询接口。
+// MetaHandler 处理标签公开查询接口。
 type MetaHandler struct {
 	wallpaperSvc *service.WallpaperService
 }
 
-// NewMetaHandler 构造分类与标签处理器。
+// NewMetaHandler 构造标签处理器。
 func NewMetaHandler(wallpaperSvc *service.WallpaperService) *MetaHandler {
 	return &MetaHandler{wallpaperSvc: wallpaperSvc}
-}
-
-// ListCategories 处理 GET /api/v1/categories。
-func (h *MetaHandler) ListCategories(c *gin.Context) {
-	res, err := h.wallpaperSvc.ListCategories(c.Request.Context())
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, res)
 }
 
 // ListTags 处理 GET /api/v1/tags。

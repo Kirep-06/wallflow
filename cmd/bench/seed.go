@@ -154,15 +154,6 @@ func seedBenchData(ctx context.Context, db *gorm.DB, rdb *redis.Client, cfg Seed
 		return nil, err
 	}
 
-	// 读取已有分类 ID
-	var categoryIDs []uint64
-	if err := db.WithContext(ctx).Table("categories").Select("id").Order("id ASC").Pluck("id", &categoryIDs).Error; err != nil {
-		return nil, fmt.Errorf("load categories: %w", err)
-	}
-	if len(categoryIDs) == 0 {
-		return nil, fmt.Errorf("categories table is empty, ensure migrations were applied")
-	}
-
 	// 仅算一次 bcrypt（cost=4 足够本地测试账号）
 	pwHashBytes, err := bcrypt.GenerateFromPassword([]byte("BenchPass123!"), bcrypt.MinCost)
 	if err != nil {
@@ -229,7 +220,7 @@ func seedBenchData(ctx context.Context, db *gorm.DB, rdb *redis.Client, cfg Seed
 
 	// 4. 灌入壁纸、图片子表、标签关联、互动统计（按时间交错分布于最近 30 天）
 	fmt.Printf("[seed] Inserting %d wallpapers + wallpaper_images + wallpaper_stats + wallpaper_tags...\n", cfg.Wallpapers)
-	if err := seedWallpapers(ctx, db, meta, categoryIDs, tagIDs, cfg.Wallpapers, now); err != nil {
+	if err := seedWallpapers(ctx, db, meta, tagIDs, cfg.Wallpapers, now); err != nil {
 		return nil, err
 	}
 
@@ -388,7 +379,7 @@ func seedWallpapers(
 	ctx context.Context,
 	db *gorm.DB,
 	meta *SeedMeta,
-	categoryIDs, tagIDs []uint64,
+	tagIDs []uint64,
 	total int,
 	now time.Time,
 ) error {
@@ -404,11 +395,11 @@ func seedWallpapers(
 		count := batchEnd - batchStart
 
 		var wpSB strings.Builder
-		wpSB.WriteString("INSERT INTO wallpapers (user_id, category_id, title, description, object_key, width, height, orientation, is_4k, size_bytes, status, created_at) VALUES ")
-		wpArgs := make([]any, 0, count*7)
+		wpSB.WriteString("INSERT INTO wallpapers (user_id, title, description, object_key, width, height, orientation, size_bytes, status, created_at) VALUES ")
+		wpArgs := make([]any, 0, count*6)
 
 		var imgSB strings.Builder
-		imgSB.WriteString("INSERT INTO wallpaper_images (wallpaper_id, sort_no, object_key, width, height, orientation, is_4k, size_bytes, created_at) VALUES ")
+		imgSB.WriteString("INSERT INTO wallpaper_images (wallpaper_id, sort_no, object_key, width, height, orientation, size_bytes, created_at) VALUES ")
 		imgArgs := make([]any, 0, count*3)
 
 		var statsSB strings.Builder
@@ -434,7 +425,6 @@ func seedWallpapers(
 			default:
 				authorID = meta.FanUserIDs[i%len(meta.FanUserIDs)]
 			}
-			catID := categoryIDs[i%len(categoryIDs)]
 			createdAt := startTime.Add(step * time.Duration(i)).Format("2006-01-02 15:04:05.000")
 			objKey := fmt.Sprintf("bench/wp/%06d.jpg", wpID)
 
@@ -443,10 +433,10 @@ func seedWallpapers(
 				imgSB.WriteByte(',')
 				statsSB.WriteByte(',')
 			}
-			wpSB.WriteString("(?, ?, ?, 'bench wallpaper description', ?, 3840, 2160, 1, 1, 4200000, 1, ?)")
-			wpArgs = append(wpArgs, authorID, catID, fmt.Sprintf("Bench 4K Wallpaper #%06d", wpID), objKey, createdAt)
+			wpSB.WriteString("(?, ?, 'bench wallpaper description', ?, 3840, 2160, 1, 4200000, 1, ?)")
+			wpArgs = append(wpArgs, authorID, fmt.Sprintf("Bench Wallpaper #%06d", wpID), objKey, createdAt)
 
-			imgSB.WriteString("(?, 0, ?, 3840, 2160, 1, 1, 4200000, ?)")
+			imgSB.WriteString("(?, 0, ?, 3840, 2160, 1, 4200000, ?)")
 			imgArgs = append(imgArgs, wpID, objKey, createdAt)
 
 			// 幂律分布互动计数，制造真实头部热门作品
